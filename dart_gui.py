@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.92 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.93 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -128,6 +128,41 @@ def cell_num(v):
         return -n if neg else n
     except: return None
 
+def _to_cell_value(v):
+    """
+    DSD 텍스트 값을 Excel 숫자 타입으로 변환.
+    → 이렇게 해야 =SUM() 수식이 실제로 합산됨
+
+    변환 규칙:
+    - '24,942,490,809' → int(24942490809)
+    - '(25,608,081)'   → int(-25608081)  (음수)
+    - '1.97'           → float(1.97)
+    - '9', '10', '34'  → int(9), int(10) (주석번호도 무방: 롤오버 4자리 필터로 이미 제외)
+
+    제외(문자열 유지):
+    - '5,32,33' 같은 쉼표 구분 다중 번호 → 붙이면 '53233'이 되어 오작동
+    - '-', 빈문자열, 변환 불가 텍스트
+    """
+    s = str(v).strip()
+    if not s or s in ('-', ''): return v
+
+    # 쉼표로 구분된 1~2자리 숫자 조합만 제외: '5,32,33', '6,18,32,33' 등
+    # (붙이면 전혀 다른 숫자가 되므로)
+    parts = s.split(',')
+    if (len(parts) >= 2 and
+            all(p.strip().isdigit() and 1 <= len(p.strip()) <= 2 for p in parts)):
+        return v
+
+    neg = s.startswith('(') and s.endswith(')')
+    clean = s.replace(',','').replace('(','').replace(')','').replace(' ','')
+    if not clean: return v
+    try:
+        n = float(clean) if '.' in clean else int(clean)
+        return -n if neg else n
+    except (ValueError, OverflowError, TypeError):
+        return v
+
+
 def safe_fmt(v, fmt=',.0f', fallback='없음'):
     """None/NaN/빈값 안전 포맷팅 — NoneType.__format__ 오류 방지"""
     import math as _math
@@ -176,9 +211,34 @@ def _rollover_sheet(ws, fill_000=True):
             if vclean and vclean.replace('.','').isdigit() and len(vclean) >= 4:
                 amt_cells.append((ci, cell))
 
-        # 금액 셀이 2개 미만이면 롤오버 불가 (소계행·비어있는행 등)
-        if len(amt_cells) < 2:
+        # 금액 셀 수에 따라 분기 처리
+        if len(amt_cells) == 0:
             continue
+
+        elif len(amt_cells) == 1:
+            # ── 단일 금액 셀: 전기 위치가 '-' 또는 빈칸인 행 처리 ──────
+            # 예) 기타비유동자산: col3=305,510,000 / col5='-'
+            #     보증금의 증가:  col3=(330,000)  / col5='-'
+            _cc, c_cell = amt_cells[0]
+            p_cell = None
+            # 1순위: '-' 값을 가진 노란셀 탐색 (명시적 전기 자리)
+            for ci2 in range(_cc + 1, ws.max_column + 1):
+                cand = ws.cell(rowi, ci2)
+                if is_edit(cand) and str(cand.value or '').strip() == '-':
+                    p_cell = cand
+                    break
+            # 2순위: '-' 없으면 빈 노란셀 탐색
+            if p_cell is None:
+                for ci2 in range(_cc + 1, ws.max_column + 1):
+                    cand = ws.cell(rowi, ci2)
+                    if is_edit(cand) and cand.value in (None, ''):
+                        p_cell = cand
+                        break
+            if p_cell is None:
+                continue  # 전기 자리 없으면 skip
+            p_cell.value = c_cell.value
+            c_cell.value = '000' if fill_000 else None
+            continue  # 단일 셀 처리 완료
 
         # ── 열 인덱스 오름차순 정렬 후 마지막 두 열 타겟팅 ─────────
         # 뒤에서 두 번째 = 당기열,  마지막 = 전기열
@@ -656,7 +716,7 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     # 사용안내 (요약수치 시트 없음)
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.92)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.93)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -725,7 +785,11 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
                 col=1
                 for cell in row:
                     if col>26: break
-                    wc=ws.cell(er,col,cell['value']); v,tag=cell['value'],cell['tag']
+                    v,tag=cell['value'],cell['tag']
+                    # 헤더(TH/TE)는 그대로, 데이터 셀은 숫자 타입으로 변환
+                    # → =SUM() 수식이 실제로 합산되게 함
+                    cell_val = _to_cell_value(v) if tag not in ('TH','TE') else v
+                    wc=ws.cell(er,col,cell_val)
                     if tag in ('TH','TE'):
                         wc.fill=fill(C['navy']); wc.font=fnt(C['white'],bold=True,size=9)
                         wc.alignment=aln('center',wrap=True)
@@ -892,7 +956,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.92</title>
+<title>easydsd v0.93</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -1057,7 +1121,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.92</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.93</p>
     </div>
     <div class="hd-right">
       <div class="hd-badge">v0.9</div>
@@ -1323,7 +1387,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       <div class="dev-pro">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>Easydsd 0.92v</h2>
+          <h2>Easydsd 0.93v</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + 전기금액 검증 + DSD 비교</div>
           <div class="dev-bg">
             <span class="badge bg0">v0.9</span>
@@ -1335,7 +1399,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.92v</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.93v</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -1605,7 +1669,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)
         ws_v.sheet_view.showGridLines=False
-        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.92)')
+        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.93)')
         tc.fill=PatternFill('solid',fgColor='4A148C'); tc.font=Font(color='FFFFFF',bold=True,size=12)
         tc.alignment=Alignment(horizontal='left',vertical='center')
         ws_v.merge_cells('A1:F1'); ws_v.row_dimensions[1].height=28
@@ -1767,7 +1831,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*54)
-    print('  easydsd v0.92 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.93 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)

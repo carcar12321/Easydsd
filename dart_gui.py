@@ -38,43 +38,11 @@ except ImportError:
 # ── IS_FROZEN: PyInstaller EXE 여부 판별 ─────────────────────────────────────
 IS_FROZEN = getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")
 
-GENAI_AVAILABLE = False
-genai = None
-
-def _load_genai():
-    """google-generativeai 로드. 없으면 .py 환경에서만 자동 설치."""
-    global genai, GENAI_AVAILABLE
-    # 1차: 그냥 import 시도
-    try:
-        import google.generativeai as _g
-        genai = _g; GENAI_AVAILABLE = True
-        return
-    except ImportError:
-        pass
-
-    # EXE 환경 → pip 실행 불가, 조용히 종료
-    if IS_FROZEN:
-        return
-
-    # .py 환경 → pip으로 설치 후 재시도
-    print("Gemini AI 라이브러리 설치 중... (최초 1회, 1~2분 소요)")
-    try:
-        import subprocess, importlib
-        # --user 없이 설치 (Windows 경로 문제 방지)
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install",
-             "google-generativeai", "grpcio", "-q"],
-            timeout=180
-        )
-        importlib.invalidate_caches()
-        import google.generativeai as _g
-        genai = _g; GENAI_AVAILABLE = True
-        print("[OK] Gemini AI 설치 완료!")
-    except Exception as e:
-        print(f"[!] 설치 실패: {e}")
-        print("    수동 설치: pip install google-generativeai")
-
-_load_genai()
+# ── google-generativeai Raw import ────────────────────────────────────────────
+# try/except 제거: PyInstaller가 필수 의존성으로 인식하도록 생(Raw) import 사용
+# EXE 빌드 시 PyInstaller가 이 라인을 보고 google 패키지 전체를 번들링함
+import google.generativeai as genai  # noqa: E402
+GENAI_AVAILABLE = True
 
 # ── 기본 상수 ──────────────────────────────────────────────────────────────────
 def find_free_port(start=5000, end=5099):
@@ -162,7 +130,7 @@ def parse_xml(xml):
 # ── Gemini: AI 시트명 분류 ─────────────────────────────────────────────────────
 def gemini_classify_tables(api_key:str, tables:list) -> dict:
     """TABLE 목록 -> Gemini -> {table_idx: 추천시트명}"""
-    if not GENAI_AVAILABLE or not api_key: return {}
+    if not api_key: return {}
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
@@ -189,8 +157,8 @@ JSON만 응답: {{"매핑":[{{"idx":0,"시트명":"예시"}}]}}"""
 # ── Gemini: AI 교차 검증 ──────────────────────────────────────────────────────
 def gemini_verify_excel(api_key:str, fin_data:dict, note_data:dict) -> str:
     """재무제표 + 주석 -> Gemini -> 교차검증 결과 텍스트"""
-    if not GENAI_AVAILABLE or not api_key:
-        return "❌ Gemini API 키가 없거나 라이브러리가 설치되지 않았습니다."
+    if not api_key:
+        return "❌ Gemini API 키가 없습니다."
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
@@ -950,8 +918,7 @@ def api_dsd2excel():
         if ai_classify:
             if not api_key:
                 return jsonify(error='AI 분류를 사용하려면 Gemini API Key를 입력해주세요.'), 400
-            if not GENAI_AVAILABLE:
-                return jsonify(error='google-generativeai 라이브러리가 설치되지 않았습니다.\n실행.bat을 닫고 cmd에서 "pip install google-generativeai" 실행 후 다시 시도해주세요.'), 500
+
             xml=zipfile.ZipFile(io.BytesIO(dsd_bytes)).read('contents.xml').decode('utf-8',errors='replace')
             _,tables=parse_xml(xml)
             ai_mapping=gemini_classify_tables(api_key,tables)
@@ -1001,7 +968,7 @@ def api_verify_excel():
         xlsx_bytes=request.files['xlsx'].read()
         api_key=request.form.get('api_key','').strip()
         if not api_key: return jsonify(error='Gemini API Key가 필요합니다.'),400
-        if not GENAI_AVAILABLE: return jsonify(error='google-generativeai 라이브러리 미설치'),500
+
         fin_data,note_data=extract_fin_and_notes(xlsx_bytes)
         if not fin_data: return jsonify(error='재무제표 시트(🏦💹📈💰)를 찾을 수 없습니다.'),400
         verify_result=gemini_verify_excel(api_key,fin_data,note_data)
@@ -1047,7 +1014,6 @@ if __name__=='__main__':
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*52)
-    if not GENAI_AVAILABLE:
-        print('  [!] google-generativeai 미설치 - AI 기능 비활성')
+
     threading.Thread(target=open_browser,daemon=True).start()
     app.run(host='127.0.0.1',port=PORT,debug=False)

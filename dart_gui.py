@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.9 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.91 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -128,6 +128,18 @@ def cell_num(v):
         return -n if neg else n
     except: return None
 
+def safe_fmt(v, fmt=',.0f', fallback='없음'):
+    """None/NaN/빈값 안전 포맷팅 — NoneType.__format__ 오류 방지"""
+    import math as _math
+    if v is None: return fallback
+    try:
+        fv = float(v)
+        if _math.isnan(fv) or _math.isinf(fv): return fallback
+        return format(fv, fmt)
+    except (TypeError, ValueError):
+        return fallback
+
+
 # ── 기능1: 롤오버 (수정된 버전) ───────────────────────────────────────────────
 def _rollover_sheet(ws, fill_000=True):
     """
@@ -147,79 +159,30 @@ def _rollover_sheet(ws, fill_000=True):
         half=len(num_cells)//2
         for (_cc,c_cell),(_pc,p_cell) in zip(num_cells[:half],num_cells[half:]):
             p_cell.value=c_cell.value
-            c_cell.value=0 if fill_000 else None
-
-
-def _gemini_judge_note_rollover(api_key, note_sheets_data, model_name):
-    """
-    주석 시트만 Gemini에 보내 롤오버 필요 여부 판별.
-    note_sheets_data: [(sname, preview_text), ...]
-    반환: 롤오버 필요 시트명 set
-    """
-    if not api_key or not note_sheets_data:
-        return set()
-    try:
-        genai.configure(api_key=api_key)
-        model=genai.GenerativeModel(model_name)
-        block_sep=chr(10)+'---'+chr(10)
-        entries=[]
-        for sname,preview in note_sheets_data:
-            entries.append('SHEET['+sname+']'+chr(10)+preview)
-        sheet_block=block_sep.join(entries)
-        prompt=(
-            'Korean DART audit report note sheets. Judge each sheet:'+chr(10)
-            +'Does it compare Current vs Prior period side-by-side (Rollover needed)?'+chr(10)
-            +'TRUE = has both current & prior numeric columns'+chr(10)
-            +'FALSE = single period / text only / rates / shareholder list'+chr(10)+chr(10)
-            +'Sheets:'+chr(10)+sheet_block+chr(10)+chr(10)
-            +'JSON ONLY: {"results":[{"name":"sheetname","rollover":true}]}'
-        )
-        resp=model.generate_content(prompt)
-        m=re.search(r'\{.*\}',resp.text.strip(),re.DOTALL)
-        if not m: return set()
-        data=json.loads(m.group(0))
-        result={item['name'] for item in data.get('results',[]) if item.get('rollover') is True}
-        print('[Rollover AI notes] TRUE:'+str(len(result)))
-        return result
-    except Exception as e:
-        print('[Rollover AI error] '+str(e))
-        return set()
+            c_cell.value="000" if fill_000 else None
 
 
 def apply_rollover_smart(wb, api_key='', model_name='gemini-3-flash-preview'):
     """
-    스마트 롤오버:
-    - FIN 시트(🏦💹📈💰): 무조건 롤오버 (AI 판별 없음)
-    - 주석 시트(📝): AI 판별 → TRUE인 것만 롤오버
-    - 당기 빈칸: 0 채우기
+    버그픽스 v0.91:
+    - AI 판별 완전 제거
+    - 4대 재무제표 본문 시트만 무조건 롤오버
+      (시트명에 '재무상태표','손익계산서','자본변동표','현금흐름표' 포함 여부로 판단)
+    - '주석' 이라는 단어가 포함된 시트는 절대 건드리지 않음
+    - 당기 빈칸에 문자열 "000" 채우기
     """
-    SKIP_NAMES={'📋사용안내','_원본XML','🤖AI검증결과'}
+    # 롤오버 적용 대상 키워드
+    FIN_KEYWORDS = ('재무상태표', '손익계산서', '포괄손익', '자본변동표', '현금흐름표')
+    NOTE_KEYWORD = '주석'
 
-    # 1. FIN 시트 무조건 롤오버
     for sname in wb.sheetnames:
-        if any(sname.startswith(p) for p in FIN_PREFIXES):
+        # 주석 시트는 절대 건드리지 않음
+        if NOTE_KEYWORD in sname:
+            continue
+        # 4대 재무제표 본문 시트만 적용
+        if any(kw in sname for kw in FIN_KEYWORDS):
             _rollover_sheet(wb[sname], fill_000=True)
 
-    # 2. 주석 시트 AI 판별
-    note_data=[]
-    for sname in wb.sheetnames:
-        if sname in SKIP_NAMES: continue
-        if any(sname.startswith(p) for p in FIN_PREFIXES): continue
-        ws=wb[sname]
-        rows_preview=[]
-        for rowi in range(1,min(7,ws.max_row+1)):
-            vals=[str(ws.cell(rowi,ci).value or '')
-                  for ci in range(1,min(7,ws.max_column+1))]
-            vals=[v for v in vals if v.strip()]
-            if vals: rows_preview.append(' | '.join(vals))
-        if rows_preview:
-            note_data.append((sname,chr(10).join(rows_preview[:4])))
-
-    if note_data and api_key:
-        allowed=_gemini_judge_note_rollover(api_key,note_data,model_name)
-        for sname in allowed:
-            if sname in wb.sheetnames:
-                _rollover_sheet(wb[sname],fill_000=True)
 
 
 # ── 기능2: 합계/총계 행 SUM 수식 자동화 ─────────────────────────────────────
@@ -396,10 +359,35 @@ def gemini_verify_enhanced(api_key,fin_data,note_data,py_result,model_name='gemi
         return f'Gemini API 오류: {e}'
 
 
-# ── 기능3: DSD에서 당기/전기 데이터 추출 ──────────────────────────────────────
+# ── 기능3: DSD에서 당기/전기 데이터 추출 (버그3 수정: COLSPAN 확장) ─────────────
+def _parse_tr_with_colspan(tr_content):
+    """TR의 셀을 COLSPAN 확장하여 파싱 — 헤더와 데이터 행 열 인덱스 일치"""
+    cells=[]
+    for td in re.finditer(r'<(?:TD|TH|TU|TE)([^>]*)>(.*?)</(?:TD|TH|TU|TE)>',tr_content,re.DOTALL):
+        attrs=td.group(1)
+        v=re.sub(r'<[^>]+>','',td.group(2))
+        v=v.replace('&amp;cr;',' ').replace('&amp;','&').replace('&cr;',' ').strip()
+        cm=re.search(r'COLSPAN="(\d+)"',attrs,re.IGNORECASE)
+        cs=int(cm.group(1)) if cm else 1
+        cells.append(v)
+        for _ in range(cs-1): cells.append('')  # colspan만큼 빈칸 확장
+    return cells
+
+
+def _find_num_in_span(row, col_start, span=2):
+    """col_start 부터 span칸 내에서 첫 번째 유효한 숫자 반환 (total행/detail행 모두 대응)"""
+    for offset in range(max(span, 1)):
+        idx=col_start+offset
+        if idx>=len(row): break
+        n=cell_num(row[idx])
+        if n is not None: return n
+    return None
+
+
 def parse_dsd_periods(dsd_bytes):
     """
-    DSD 재무제표 본문 테이블에서 (fin_label, account, cur_val, pri_val) 추출
+    DSD 재무제표 본문 테이블에서 (fin_label, account, cur_val, pri_val) 추출.
+    버그3 수정: COLSPAN 확장 파싱으로 당기/전기 열 인덱스를 정확히 타겟팅.
     """
     with zipfile.ZipFile(io.BytesIO(dsd_bytes)) as zf:
         xml=zf.read('contents.xml').decode('utf-8',errors='replace')
@@ -412,35 +400,45 @@ def parse_dsd_periods(dsd_bytes):
                         if any(kw in ctx or kw in tbody for kw in kws)),'')
         if not fin_label: continue
 
+        # COLSPAN 확장하여 모든 TR 파싱
         rows=[]
         for tr in re.finditer(r'<TR[^>]*>(.*?)</TR>',tm.group(2),re.DOTALL):
-            cells=[]
-            for td in re.finditer(r'<(?:TD|TH|TU|TE)[^>]*>(.*?)</(?:TD|TH|TU|TE)>',tr.group(1),re.DOTALL):
-                v=re.sub(r'<[^>]+>','',td.group(1))
-                v=(v.replace('&amp;cr;',' ').replace('&amp;','&').replace('&cr;',' ').strip())
-                cells.append(v)
+            cells=_parse_tr_with_colspan(tr.group(1))
             if cells: rows.append(cells)
+        if not rows: continue
 
-        # 헤더에서 당기/전기 열 찾기
+        # 헤더에서 당기/전기 열 찾기 (COLSPAN 확장 후 정확한 인덱스)
         cur_col=pri_col=None
-        for row in rows[:5]:
+        cur_span=pri_span=2  # 기본 span=2 (대부분 colspan=2)
+        for row in rows[:6]:
             for ci,v in enumerate(row):
-                if '당' in v and '기' in v and cur_col is None: cur_col=ci
-                elif '전' in v and '기' in v and pri_col is None: pri_col=ci
+                if cur_col is None and '당' in v and '기' in v:
+                    cur_col=ci
+                    # 확장된 span 계산: 다음 셀이 빈칸이면 span=2 이상
+                    span_count=1
+                    while ci+span_count<len(row) and row[ci+span_count]=='':
+                        span_count+=1
+                    cur_span=max(span_count,1)
+                elif pri_col is None and '전' in v and '기' in v:
+                    pri_col=ci
+                    span_count=1
+                    while ci+span_count<len(row) and row[ci+span_count]=='':
+                        span_count+=1
+                    pri_span=max(span_count,1)
             if cur_col is not None and pri_col is not None: break
 
         if cur_col is None or pri_col is None: continue
 
+        # 데이터 행에서 당기/전기 값 추출
         for row in rows:
-            if len(row)<=max(cur_col,pri_col): continue
-            acct=row[0].strip()
+            acct=row[0].strip() if row else ''
             if not acct or len(acct)<2: continue
-            cur=cell_num(row[cur_col]) if cur_col<len(row) else None
-            pri=cell_num(row[pri_col]) if pri_col<len(row) else None
+            # span 범위 내에서 유효 숫자 탐색
+            cur=_find_num_in_span(row, cur_col, cur_span)
+            pri=_find_num_in_span(row, pri_col, pri_span)
             if cur is not None or pri is not None:
-                results.append((fin_label,acct,cur,pri))
+                results.append((fin_label, acct, cur, pri))
     return results
-
 
 def validate_prior_period(prev_dsd,curr_dsd,api_key,model_name='gemini-3-flash-preview'):
     """
@@ -482,11 +480,11 @@ def validate_prior_period(prev_dsd,curr_dsd,api_key,model_name='gemini-3-flash-p
             genai.configure(api_key=api_key)
             model_obj=genai.GenerativeModel(model_name)
             mm_text=chr(10).join(
-                f'  [{lb}] {ac}: 전기이월 오류! 수정전당기={pc:,.0f}, 수정후전기={cp:,.0f if cp else "없음"}, 차이={df:,.0f if df else "N/A"}'
+                '  ['+lb+'] '+ac+': 전기이월 오류! 수정전당기='+safe_fmt(pc)+', 수정후전기='+safe_fmt(cp)+', 차이='+safe_fmt(df,',.0f','N/A')
                 for lb,ac,pc,cp,df in mismatches[:20]
             ) or '없음'
             chg_text=chr(10).join(
-                f'  [{lb}] {ac}: 당기={cu:,.0f if cu else "-"}, 전기={pi:,.0f if pi else "-"}'
+                '  ['+lb+'] '+ac+': 당기='+safe_fmt(cu,',.0f','-')+', 전기='+safe_fmt(pi,',.0f','-')
                 for lb,ac,cu,pi in curr_data[:30]
             )
             prompt=(
@@ -629,7 +627,7 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     # 사용안내 (요약수치 시트 없음)
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.9)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.91)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -865,7 +863,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.9</title>
+<title>easydsd v0.91</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -1030,7 +1028,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.9</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.91</p>
     </div>
     <div class="hd-right">
       <div class="hd-badge">v0.9</div>
@@ -1296,7 +1294,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       <div class="dev-pro">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>Easydsd 0.9v</h2>
+          <h2>Easydsd 0.91v</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + 전기금액 검증 + DSD 비교</div>
           <div class="dev-bg">
             <span class="badge bg0">v0.9</span>
@@ -1308,7 +1306,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.9v</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.91v</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -1578,7 +1576,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)
         ws_v.sheet_view.showGridLines=False
-        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.9)')
+        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.91)')
         tc.fill=PatternFill('solid',fgColor='4A148C'); tc.font=Font(color='FFFFFF',bold=True,size=12)
         tc.alignment=Alignment(horizontal='left',vertical='center')
         ws_v.merge_cells('A1:F1'); ws_v.row_dimensions[1].height=28
@@ -1740,7 +1738,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*54)
-    print('  easydsd v0.9 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.91 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)

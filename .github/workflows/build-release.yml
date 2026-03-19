@@ -18,15 +18,27 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 라이브러리 설치
-        run: pip install flask openpyxl pyinstaller --quiet
+      - name: pip 업그레이드
+        run: python -m pip install --upgrade pip
+
+      - name: 핵심 패키지 설치 (google-generativeai 포함)
+        run: |
+          pip install flask openpyxl pyinstaller
+          pip install google-generativeai google-api-core
+          pip install grpcio grpcio-status
+          pip install pydantic
+          pip install --upgrade google-generativeai
+
+      - name: 설치 확인
+        run: |
+          python -c "import google.generativeai; print('google-generativeai OK')"
+          python -c "import grpc; print('grpc OK')"
+          python -c "import flask; print('flask OK')"
+          python -c "import openpyxl; print('openpyxl OK')"
 
       - name: EXE 빌드
         run: |
           pyinstaller --onefile --noconsole --name "easydsd" ^
-            --hidden-import=openpyxl ^
-            --hidden-import=openpyxl.styles ^
-            --hidden-import=openpyxl.utils ^
             --hidden-import=flask ^
             --hidden-import=werkzeug ^
             --hidden-import=werkzeug.serving ^
@@ -34,14 +46,39 @@ jobs:
             --hidden-import=werkzeug.exceptions ^
             --hidden-import=jinja2 ^
             --hidden-import=click ^
+            --hidden-import=openpyxl ^
+            --hidden-import=openpyxl.styles ^
+            --hidden-import=openpyxl.utils ^
+            --hidden-import=google.generativeai ^
+            --hidden-import=google.ai.generativelanguage ^
+            --hidden-import=google.api_core ^
+            --hidden-import=google.auth ^
+            --hidden-import=google.protobuf ^
+            --hidden-import=grpc ^
+            --hidden-import=grpc._channel ^
+            --hidden-import=pydantic ^
             --collect-all=flask ^
             --collect-all=werkzeug ^
             --collect-all=jinja2 ^
+            --collect-all=openpyxl ^
+            --collect-all=google ^
+            --collect-all=google.generativeai ^
+            --collect-all=grpc ^
+            --collect-all=pydantic ^
+            --copy-metadata=google-generativeai ^
+            --copy-metadata=google-api-core ^
+            --copy-metadata=grpcio ^
+            --copy-metadata=pydantic ^
             --clean ^
             dart_gui.py
         shell: cmd
 
-      - name: Release에 EXE 업로드
+      - name: 빌드 결과 확인
+        run: |
+          dir dist
+          echo "빌드 완료"
+
+      - name: Release 에 EXE 업로드
         uses: softprops/action-gh-release@v2
         with:
           name: "easydsd ${{ github.ref_name }}"
@@ -53,9 +90,13 @@ jobs:
             Python 설치 없이 더블클릭만으로 바로 실행됩니다.
 
             ### 사용 방법
-            1. easydsd.exe 다운로드
+            1. `easydsd.exe` 다운로드
             2. 더블클릭 → 브라우저 자동 실행
             3. DSD 파일 업로드 → Excel 변환 → 수정 → DSD 재변환
+
+            ### AI 기능 (선택사항)
+            - 상단에 Gemini API Key 입력 시 AI 스마트 분류 및 교차 검증 사용 가능
+            - API Key 발급: https://aistudio.google.com/app/apikey
 
             ### 문의
             eeffco11@naver.com

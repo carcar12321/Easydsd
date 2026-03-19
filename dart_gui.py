@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.93 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.94 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -41,6 +41,10 @@ def find_free_port(start=5000, end=5099):
 
 PORT       = find_free_port()
 EDIT_COLOR = 'FFF2CC'
+# 회계 서식: 양수=천단위 쉼표, 음수=괄호, 0='-' 표시
+FMT_ACCOUNT  = '_-* #,##0_-;-* (#,##0);_-* "-"_-;_-@_-'   # 정수 (원 단위)
+FMT_RATE     = '0.00%'                                        # 비율
+FMT_DECIMAL  = '#,##0.00'                                     # 소수
 SUM_COLOR  = 'E0F7FA'   # 합계/총계 행 색상
 C = {'navy':'1F4E79','blue':'2E75B6','lblue':'DEEAF1',
      'yellow':'FFF2CC','white':'FFFFFF','lgray':'F2F2F2','orange':'C55A11'}
@@ -210,6 +214,21 @@ def _rollover_sheet(ws, fill_000=True):
                          .replace(')','').replace('-','').replace(' ',''))
             if vclean and vclean.replace('.','').isdigit() and len(vclean) >= 4:
                 amt_cells.append((ci, cell))
+
+        # ── '-' 당기 행 감지 (정확한 판별) ─────────────────────────
+        # 판별 기준: '-' 셀이 금액 셀보다 왼쪽에 있으면 당기없음 행 → skip
+        # 예A) 차입금:      col3='-'(당기없음) / col5=10,000,000,000(전기)
+        #       → '-'이 amt_cells 최솟값(col5)보다 왼쪽  → skip
+        # 예B) 기타비유동:  col3=금액(당기) / col5='-'(전기자리)
+        #       → '-'이 amt_cells 최솟값(col3)보다 오른쪽 → 단일셀 처리 진행
+        if len(amt_cells) >= 1:
+            min_amt_col = amt_cells[0][0]  # amt_cells 이미 정렬 전이므로 min 사용
+            for ci in range(1, ws.max_column+1):
+                cell_d = ws.cell(rowi, ci)
+                if is_edit(cell_d) and str(cell_d.value or '').strip() == '-':
+                    if ci < min_amt_col:   # '-'이 금액보다 왼쪽 → 당기없음 행
+                        amt_cells = []     # 롤오버 대상 제거
+                    break                  # '-' 하나만 확인하면 충분
 
         # 금액 셀 수에 따라 분기 처리
         if len(amt_cells) == 0:
@@ -716,7 +735,7 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     # 사용안내 (요약수치 시트 없음)
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.93)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.94)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -795,7 +814,15 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
                         wc.alignment=aln('center',wrap=True)
                     else:
                         wc.fill=fill(C['yellow']); wc.font=fnt(size=9)
-                        wc.alignment=aln('right' if is_num_or_decimal(v) else 'left',wrap=True)
+                        if isinstance(cell_val, (int, float)):
+                            # 숫자 타입 → 회계 서식 적용 (음수 괄호, 0은 '-')
+                            if isinstance(cell_val, float) and cell_val != int(cell_val):
+                                wc.number_format = FMT_DECIMAL   # 소수(비율 등)
+                            else:
+                                wc.number_format = FMT_ACCOUNT   # 정수(원 단위)
+                            wc.alignment=aln('right',wrap=True)
+                        else:
+                            wc.alignment=aln('right' if is_num_or_decimal(v) else 'left',wrap=True)
                     if '\n' in str(v):
                         ws.row_dimensions[er].height=max(18,18*(str(v).count('\n')+1))
                     span=min(cell['colspan'],26-col+1)
@@ -956,7 +983,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.93</title>
+<title>easydsd v0.94</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -1121,7 +1148,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.93</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.94</p>
     </div>
     <div class="hd-right">
       <div class="hd-badge">v0.9</div>
@@ -1387,7 +1414,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       <div class="dev-pro">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>Easydsd 0.93v</h2>
+          <h2>Easydsd 0.94v</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + 전기금액 검증 + DSD 비교</div>
           <div class="dev-bg">
             <span class="badge bg0">v0.9</span>
@@ -1399,7 +1426,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.93v</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.94v</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -1669,7 +1696,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)
         ws_v.sheet_view.showGridLines=False
-        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.93)')
+        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.94)')
         tc.fill=PatternFill('solid',fgColor='4A148C'); tc.font=Font(color='FFFFFF',bold=True,size=12)
         tc.alignment=Alignment(horizontal='left',vertical='center')
         ws_v.merge_cells('A1:F1'); ws_v.row_dimensions[1].height=28
@@ -1831,7 +1858,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*54)
-    print('  easydsd v0.93 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.94 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)

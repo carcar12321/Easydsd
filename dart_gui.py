@@ -418,9 +418,12 @@ def excel_to_dsd_bytes(orig_dsd_bytes:bytes, xlsx_bytes:bytes) -> bytes:
         for k,(t_idx,excel_start_row) in enumerate(t_info):
             if t_idx>=len(table_positions): continue
             if excel_start_row>=0:
-                nxt=(t_info[k+1][1] if k+1<len(t_info) and t_info[k+1][1]>=0 else 99999)
-                local_map={(r-excel_start_row,c):v for (r,c),v in all_ch.items()
-                           if excel_start_row<=r<nxt}
+                # ★ 수식: er은 1-based, ri는 0-based(min_row=2 기준)
+                # ri = er - 2  →  s = esr - 2
+                s   = excel_start_row - 2
+                nxt_esr = t_info[k+1][1] if k+1<len(t_info) and t_info[k+1][1]>=0 else None
+                nxt = (nxt_esr - 2) if nxt_esr else 99999
+                local_map = {(r-s, c): v for (r,c),v in all_ch.items() if s<=r<nxt}
             else:
                 off=0
                 for j in range(k):
@@ -908,7 +911,13 @@ async function run3(){
 
 function showKill(){document.getElementById('killModal').classList.add('show')}
 function hideKill(){document.getElementById('killModal').classList.remove('show')}
-async function doKill(){hideKill();try{await fetch('/api/shutdown',{method:'POST'});}catch(e){}document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#556;font-size:15px;">서버가 종료되었습니다. 이 탭을 닫으세요.</div>';}
+async function doKill(){
+  hideKill();
+  localStorage.removeItem('easydsd_gemini_key');
+  localStorage.removeItem('easydsd_model');
+  try{ await fetch('/api/shutdown',{method:'POST'}); }catch(e){}
+  document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#556;font-size:15px;">서버가 종료되었습니다. 이 탭을 닫으세요.</div>';
+});}catch(e){}document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#556;font-size:15px;">서버가 종료되었습니다. 이 탭을 닫으세요.</div>';}
 </script>
 </body>
 </html>'''

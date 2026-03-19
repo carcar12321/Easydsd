@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.4 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.6 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -24,7 +24,7 @@ try:
     from openpyxl.styles import PatternFill, Font, Alignment
     from openpyxl.utils import get_column_letter
 except ImportError:
-    if not (getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS')):  # EXE 아닐 때만
+    if not IS_FROZEN:  # EXE 아닐 때만 자동 설치
         import subprocess
         subprocess.check_call([sys.executable,'-m','pip','install','flask','openpyxl','-q'])
         from flask import Flask, request, send_file, jsonify, render_template_string
@@ -35,42 +35,46 @@ except ImportError:
         print("[오류] 필수 라이브러리 누락. EXE를 다시 빌드하세요.")
         sys.exit(1)
 
-def _try_import_genai():
-    """google-generativeai import 시도. 없으면 자동 설치 후 재시도."""
+# ── IS_FROZEN: PyInstaller EXE 여부 판별 ─────────────────────────────────────
+IS_FROZEN = getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")
+
+GENAI_AVAILABLE = False
+genai = None
+
+def _load_genai():
+    """google-generativeai 로드. 없으면 .py 환경에서만 자동 설치."""
+    global genai, GENAI_AVAILABLE
+    # 1차: 그냥 import 시도
     try:
-        import google.generativeai as _genai
-        return _genai, True
+        import google.generativeai as _g
+        genai = _g; GENAI_AVAILABLE = True
+        return
     except ImportError:
         pass
 
-    # EXE(PyInstaller) 환경에서는 절대 pip 실행 안 함
-    # sys.frozen 또는 sys._MEIPASS 로 판별
-    if getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS'):
-        return None, False
+    # EXE 환경 → pip 실행 불가, 조용히 종료
+    if IS_FROZEN:
+        return
 
-    # 자동 설치 시도
-    print("  google-generativeai 설치 중... (최초 1회, 1~2분 소요)")
+    # .py 환경 → pip으로 설치 후 재시도
+    print("Gemini AI 라이브러리 설치 중... (최초 1회, 1~2분 소요)")
     try:
-        import subprocess, importlib, site
+        import subprocess, importlib
+        # --user 없이 설치 (Windows 경로 문제 방지)
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install",
-             "google-generativeai", "grpcio", "--quiet", "--user"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+             "google-generativeai", "grpcio", "-q"],
+            timeout=180
         )
-        # 새로 설치된 패키지 경로를 sys.path에 즉시 반영
         importlib.invalidate_caches()
-        user_site = site.getusersitepackages()
-        if user_site not in sys.path:
-            sys.path.insert(0, user_site)
-        import google.generativeai as _genai
-        print("  [OK] google-generativeai 설치 완료!")
-        return _genai, True
-    except Exception as _e:
-        print(f"  google-generativeai 설치 실패 - AI 기능 비활성")
-        print(f"  수동 설치: pip install google-generativeai")
-        return None, False
+        import google.generativeai as _g
+        genai = _g; GENAI_AVAILABLE = True
+        print("[OK] Gemini AI 설치 완료!")
+    except Exception as e:
+        print(f"[!] 설치 실패: {e}")
+        print("    수동 설치: pip install google-generativeai")
 
-genai, GENAI_AVAILABLE = _try_import_genai()
+_load_genai()
 
 # ── 기본 상수 ──────────────────────────────────────────────────────────────────
 def find_free_port(start=5000, end=5099):
@@ -253,7 +257,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
     # 사용안내
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.4)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.6)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -509,7 +513,7 @@ HTML=r'''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.4</title>
+<title>easydsd v0.6</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -634,10 +638,10 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &#8596; Excel 양방향 변환 &nbsp;&#xB7;&nbsp; Gemini AI 검증 &nbsp;&#xB7;&nbsp; easydsd v0.4</p>
+      <p>DSD &#8596; Excel 양방향 변환 &nbsp;&#xB7;&nbsp; Gemini AI 검증 &nbsp;&#xB7;&nbsp; easydsd v0.6</p>
     </div>
     <div class="hd-right">
-      <div class="hd-badge">v0.4</div>
+      <div class="hd-badge">v0.6</div>
       <button class="kill-btn" onclick="showKill()">&#x23FC; 종료</button>
     </div>
   </div>
@@ -659,7 +663,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
 <div class="modal-overlay" id="killModal">
   <div class="modal">
     <h3>&#x26A0;&#xFE0F; 종료할까요?</h3>
-    <p>서버가 완전히 종료됩니다.</p>
+    <p>서버 프로세스가 완전히 종료됩니다.<br>이 탭도 닫아주세요.</p>
     <div class="mbtns">
       <button class="mc" onclick="hideKill()">취소</button>
       <button class="mx" onclick="doKill()">종료</button>
@@ -794,10 +798,10 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       <div class="dev-profile">
         <div class="dev-avatar">&#127970;</div>
         <div class="dev-info">
-          <h2>Easydsd 0.4v</h2>
+          <h2>Easydsd 0.6v</h2>
           <div class="dev-sub">DART 감사보고서 DSD 파일 변환 도구(양방향) + Gemini AI</div>
           <div class="dev-badges">
-            <span class="badge bg">v0.4</span>
+            <span class="badge bg">v0.6</span>
             <span class="badge bg-gold">&#129302; AI-Powered</span>
             <span class="badge bg-tech">Python+Flask</span>
             <span class="badge bg-ai">Gemini 1.5</span>
@@ -806,7 +810,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자 연락처</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.4v</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.6v</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 1.5 Flash</div></div>
       </div>
@@ -832,10 +836,11 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
 
 <script>
 // API Key
-function loadKey(){const k=localStorage.getItem('gemini_api_key')||'';document.getElementById('apiKey').value=k;updSt(k);return k;}
-function saveKey(v){localStorage.setItem('gemini_api_key',v);updSt(v);}
+function loadKey(){const k=localStorage.getItem('easydsd_gemini_key')||'';document.getElementById('apiKey').value=k;updSt(k);return k;}
+function saveKey(v){localStorage.setItem('easydsd_gemini_key',v);updSt(v);}
 function updSt(v){const e=document.getElementById('apiSt');if(v&&v.length>10){e.textContent='🟢 입력됨';e.style.color='#a5d6a7';}else{e.textContent='⚪ 미입력';e.style.color='rgba(255,255,255,.6)';}}
-function getKey(){return localStorage.getItem('gemini_api_key')||'';}
+function getKey(){return localStorage.getItem('easydsd_gemini_key')||'';}
+function clearKey(){localStorage.removeItem('easydsd_gemini_key');document.getElementById('apiKey').value='';updSt('');}
 loadKey();
 
 // 하트비트
@@ -1038,7 +1043,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*52)
-    print('  easydsd v0.4 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.6 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*52)

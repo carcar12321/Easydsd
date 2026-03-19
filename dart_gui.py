@@ -917,7 +917,7 @@ async function doKill(){
   localStorage.removeItem('easydsd_model');
   try{ await fetch('/api/shutdown',{method:'POST'}); }catch(e){}
   document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#556;font-size:15px;">서버가 종료되었습니다. 이 탭을 닫으세요.</div>';
-});}catch(e){}document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#556;font-size:15px;">서버가 종료되었습니다. 이 탭을 닫으세요.</div>';}
+}
 </script>
 </body>
 </html>'''

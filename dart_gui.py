@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.7 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.8 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -146,27 +146,96 @@ def cell_num(v):
     except: return None
 
 # ── 기능1: 롤오버 (당기→전기 이월) ──────────────────────────────────────────
-def apply_rollover(wb):
+def _do_rollover_on_sheet(ws):
+    """단일 시트에 롤오버 적용 (당기 숫자→전기, 당기 비우기)"""
+    for rowi in range(1, ws.max_row+1):
+        num_cells=[]
+        for ci in range(1, ws.max_column+1):
+            cell=ws.cell(rowi,ci)
+            if is_edit(cell) and cell.value is not None:
+                v=str(cell.value).strip().replace(',','').replace('(','').replace(')','').replace('-','')
+                if v and v.replace('.','').isdigit() and len(v)>=3:
+                    num_cells.append((ci,cell))
+        if len(num_cells)<2: continue
+        half=len(num_cells)//2
+        for (_cc,c_cell),(_pc,p_cell) in zip(num_cells[:half], num_cells[half:]):
+            p_cell.value=c_cell.value
+            c_cell.value=None
+
+def apply_rollover(wb, allowed_sheets=None):
     """
-    재무제표 시트의 당기 값을 전기로 이월, 당기는 빈칸으로.
-    각 데이터 행에서 yellow 숫자 셀을 찾아 앞절반=당기, 뒷절반=전기로 처리.
+    롤오버 적용.
+    allowed_sheets=None  → FIN_PREFIXES 시트 전체 (기존 동작)
+    allowed_sheets=set() → 해당 시트명만 적용 (AI 판별 결과)
     """
     for sname in wb.sheetnames:
-        if not any(sname.startswith(p) for p in FIN_PREFIXES): continue
+        if allowed_sheets is not None:
+            if sname not in allowed_sheets: continue
+        else:
+            if not any(sname.startswith(p) for p in FIN_PREFIXES): continue
         ws=wb[sname]
-        for rowi in range(1, ws.max_row+1):
-            num_cells=[]
-            for ci in range(1, ws.max_column+1):
-                cell=ws.cell(rowi,ci)
-                if is_edit(cell) and cell.value is not None:
-                    v=str(cell.value).strip().replace(',','').replace('(','').replace(')','').replace('-','')
-                    if v and v.replace('.','').isdigit() and len(v)>=3:
-                        num_cells.append((ci,cell))
-            if len(num_cells)<2: continue
-            half=len(num_cells)//2
-            for (_cc,c_cell),(_pc,p_cell) in zip(num_cells[:half], num_cells[half:]):
-                p_cell.value=c_cell.value
-                c_cell.value=None
+        _do_rollover_on_sheet(ws)
+
+def gemini_judge_rollover_sheets(api_key, wb, model_name='gemini-3-flash-preview'):
+    """
+    각 시트를 Gemini에 보내 당기/전기 비교표 여부(TRUE/FALSE) 판별.
+    반환: 롤오버 필요한 시트명 set
+    """
+    SKIP = {'사용안내','_원본XML','요약수치','AI검증결과'}
+
+    def is_skip(name):
+        return any(k in name for k in SKIP)
+
+    summaries = []
+    for sname in wb.sheetnames:
+        if is_skip(sname): continue
+        ws = wb[sname]
+        rows_preview = []
+        for rowi in range(1, min(8, ws.max_row + 1)):
+            vals = [str(ws.cell(rowi, ci).value or '')
+                    for ci in range(1, min(8, ws.max_column + 1))]
+            vals = [v for v in vals if v.strip()]
+            if vals:
+                rows_preview.append(' | '.join(vals))
+        if rows_preview:
+            preview_text = chr(10).join(rows_preview[:5])
+            summaries.append('SHEET[' + sname + '] ' + preview_text)
+
+    if not summaries:
+        return {s for s in wb.sheetnames if any(s.startswith(p) for p in FIN_PREFIXES)}
+
+    if not api_key:
+        return {s for s in wb.sheetnames if any(s.startswith(p) for p in FIN_PREFIXES)}
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        sheet_block = chr(10) + '---' + chr(10)
+        sheet_block = sheet_block.join(summaries)
+
+        prompt = (
+            'These are Excel sheets extracted from a Korean DART audit report.' + chr(10)
+            + 'For each sheet, analyze the structure and headers.' + chr(10)
+            + 'Determine if this table compares Current period vs Prior period side-by-side,' + chr(10)
+            + 'meaning it needs Rollover (move current numbers to prior column).' + chr(10) + chr(10)
+            + 'TRUE = Has current & prior period columns (financial statements, some notes)' + chr(10)
+            + 'FALSE = Single period, text-only, rates/percentages only, shareholder list, etc.' + chr(10) + chr(10)
+            + 'Sheet list:' + chr(10) + sheet_block + chr(10) + chr(10)
+            + 'Respond ONLY with JSON: {"results":[{"name":"sheetname","rollover":true}]}'
+        )
+        resp = model.generate_content(prompt)
+        txt = resp.text.strip()
+        m = re.search(r'\{.*\}', txt, re.DOTALL)
+        if not m:
+            raise ValueError('no JSON')
+        data = json.loads(m.group(0))
+        result_set = {item['name'] for item in data.get('results', [])
+                      if item.get('rollover') is True}
+        print('[Rollover AI] TRUE: ' + str(len(result_set)) + ' sheets')
+        return result_set
+    except Exception as ex:
+        print('[Rollover AI error] ' + str(ex) + ' -> FIN sheets only')
+        return {s for s in wb.sheetnames if any(s.startswith(p) for p in FIN_PREFIXES)}
 
 
 # ── 기능2/4: Python 수학적 검증 ──────────────────────────────────────────────
@@ -297,18 +366,26 @@ def gemini_verify_enhanced(api_key:str,fin_data:dict,note_data:dict,
             [f"[경고] {w}" for w in py_result.get('warnings',[])] +
             [f"[정보] {i}" for i in py_result.get('info',[])]
         ) or "파이썬 자동검사 이상 없음"
+        SYSTEM_INSTRUCTION = (
+            "[지시사항] 너는 공인회계사(CPA)가 아니야. "
+            "복잡한 회계 기준, 적정성 여부, 감사 의견에 대한 훈수나 평가는 절대 하지 마. "
+            "네 유일한 임무는 '본문 재무제표(재무상태표, 손익계산서, 현금흐름표)의 합계 숫자'와 "
+            "'주석에 기재된 세부 내역의 합계 숫자'가 정확히 일치하는지 교차 검증(Footing)하는 것뿐이야. "
+            "표와 숫자를 보고 생각해서, 두 숫자가 불일치하거나 확인이 불가능한 항목만 찾아내어 "
+            "간결하게 리포트해."
+        )
         prompt=(
-            "당신은 한국 공인회계사(CPA) 수준의 재무제표 검증 전문가입니다.\n\n"
-            f"[파이썬 수학적 1차 검사 결과]\n{py_errors_text}\n\n"
-            f"[재무제표 본문]\n{fin_text}\n\n"
+            SYSTEM_INSTRUCTION + "\n\n"
+            f"[파이썬 1차 수학 검사 결과 - 이미 확인된 오류]\n{py_errors_text}\n\n"
+            f"[재무제표 본문 데이터]\n{fin_text}\n\n"
             f"[주석 데이터]\n{note_text}\n\n"
-            "파이썬이 찾은 수학적 오류 내용과 재무제표 맥락을 합쳐서 최종 검증 리포트를 작성해 주세요.\n\n"
+            "파이썬이 찾은 수학적 오류 내용과 재무제표 맥락을 합쳐서 최종 교차검증 리포트를 작성해줘.\n\n"
             "응답 형식:\n"
             "## ✅ 파이썬 수학 검사 결과\n(자동검사 결과 요약)\n\n"
-            "## ✅ 일치 항목\n(AI가 확인한 일치 항목)\n\n"
-            "## ❌ 불일치 항목\n(불일치 + 차이 금액)\n\n"
-            "## ⚠️ 확인 필요 항목\n(데이터 부족 등)\n\n"
-            "## 📋 종합 의견\n(전체 요약)"
+            "## ✅ 일치 항목\n(본문과 주석 합계가 일치하는 항목만)\n\n"
+            "## ❌ 불일치 항목\n(불일치 항목 + 본문금액 vs 주석합계 + 차이금액)\n\n"
+            "## ⚠️ 확인 불가 항목\n(데이터 부족으로 검증 불가한 항목만)\n\n"
+            "## 📋 종합\n(전체 요약 2~3줄. 회계 의견 금지)"
         )
         resp=model.generate_content(prompt)
         return resp.text.strip()
@@ -462,7 +539,7 @@ def extract_fin_and_notes(xlsx_bytes:bytes)->tuple:
     return fin_data,note_data
 
 # ── DSD -> Excel 변환 (롤오버 옵션 포함) ─────────────────────────────────────
-def dsd_to_excel_bytes(dsd_bytes:bytes,ai_mapping:dict=None,do_rollover:bool=False)->bytes:
+def dsd_to_excel_bytes(dsd_bytes:bytes,ai_mapping:dict=None,do_rollover:bool=False,rollover_api_key:str='',rollover_model:str='gemini-3-flash-preview')->bytes:
     with zipfile.ZipFile(io.BytesIO(dsd_bytes)) as zf:
         files={n:zf.read(n) for n in zf.namelist()}
     xml      =files.get('contents.xml',b'').decode('utf-8',errors='replace')
@@ -473,7 +550,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes,ai_mapping:dict=None,do_rollover:bool=Fal
     # 사용안내
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.7)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.8)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -592,9 +669,15 @@ def dsd_to_excel_bytes(dsd_bytes:bytes,ai_mapping:dict=None,do_rollover:bool=Fal
         t=tables[t_idx]; ws_r.cell(ri,1,sname); ws_r.cell(ri,2,t_idx)
         ws_r.cell(ri,3,t['fin_label']); ws_r.cell(ri,4,t['ctx_title']); ws_r.cell(ri,5,excel_row)
 
-    # 롤오버 적용
+    # 롤오버 적용 (AI 판별 + Python 실행)
     if do_rollover:
-        apply_rollover(wb)
+        if rollover_api_key:
+            # AI가 TRUE 판별한 시트만 롤오버
+            allowed = gemini_judge_rollover_sheets(rollover_api_key, wb, rollover_model)
+            apply_rollover(wb, allowed_sheets=allowed)
+        else:
+            # API Key 없으면 재무4표만 기본 롤오버
+            apply_rollover(wb, allowed_sheets=None)
 
     buf=io.BytesIO(); wb.save(buf); return buf.getvalue()
 
@@ -727,7 +810,7 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.7</title>
+<title>easydsd v0.8</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -884,10 +967,10 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; DSD 비교 &nbsp;&#xB7;&nbsp; easydsd v0.7</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; DSD 비교 &nbsp;&#xB7;&nbsp; easydsd v0.8</p>
     </div>
     <div class="hd-right">
-      <div class="hd-badge">v0.7</div>
+      <div class="hd-badge">v0.8</div>
       <button class="kill-btn" onclick="showKill()">&#x23FC; 종료</button>
     </div>
   </div>
@@ -1108,10 +1191,10 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       <div class="dev-profile">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>Easydsd 0.7v</h2>
+          <h2>Easydsd 0.8v</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + DSD 비교 + 롤오버</div>
           <div class="dev-badges">
-            <span class="badge bg0">v0.7</span>
+            <span class="badge bg0">v0.8</span>
             <span class="badge bg-gold">&#129302; AI-Powered</span>
             <span class="badge bg-tech">Python+Flask</span>
             <span class="badge bg-ai">Gemini 3 Flash</span>
@@ -1120,7 +1203,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.7v</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.8v</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -1131,7 +1214,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
         </div>
       </div>
       <div class="fs">
-        <h3>&#10024; v0.7 주요 기능</h3>
+        <h3>&#10024; v0.8 주요 기능</h3>
         <div class="fi"><div class="fic">&#128260;</div><div><b>롤오버(Rollover)</b> - DSD->Excel 시 당기 실적을 전기 칸으로 자동 이월, 당기 칸 비우기</div></div>
         <div class="fi"><div class="fic">&#128270;</div><div><b>Python 수학 검증</b> - 대차평균(자산=부채+자본), 단위 자릿수 이상, 주석번호 매핑 자동 검사</div></div>
         <div class="fi"><div class="fic">&#129302;</div><div><b>AI 강화 검증</b> - Python 오류를 Gemini에 전달하여 맥락 있는 최종 검증 리포트 생성</div></div>
@@ -1401,7 +1484,12 @@ def api_dsd2excel():
             xml_raw = zipfile.ZipFile(io.BytesIO(dsd_bytes)).read('contents.xml').decode('utf-8',errors='replace')
             _, tables = parse_xml(xml_raw)
             ai_mapping = gemini_classify_tables(api_key, tables, model_name)
-        xlsx = dsd_to_excel_bytes(dsd_bytes, ai_mapping or None, do_rollover=do_rollover)
+        # 롤오버 시 AI 판별용 key: 롤오버 체크가 켜진 경우에만 사용
+        r_api_key = api_key if do_rollover else ''
+        xlsx = dsd_to_excel_bytes(dsd_bytes, ai_mapping or None,
+                                   do_rollover=do_rollover,
+                                   rollover_api_key=r_api_key,
+                                   rollover_model=model_name)
         wb   = openpyxl.load_workbook(io.BytesIO(xlsx), data_only=True)
         cells = sum(1 for ws in wb.worksheets for row in ws.iter_rows()
                     for cell in row if cell.fill and cell.fill.fill_type=='solid'
@@ -1479,7 +1567,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v = wb.create_sheet('🤖AI검증결과', 0)
         ws_v.sheet_view.showGridLines = False
-        tc = ws_v.cell(1, 1, '🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.7)')
+        tc = ws_v.cell(1, 1, '🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.8)')
         tc.fill = PatternFill('solid', fgColor='4A148C')
         tc.font = Font(color='FFFFFF', bold=True, size=12)
         tc.alignment = Alignment(horizontal='left', vertical='center')
@@ -1556,7 +1644,7 @@ def open_browser():
 
 if __name__ == '__main__':
     print('='*54)
-    print('  easydsd v0.7 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.8 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)

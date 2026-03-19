@@ -128,12 +128,12 @@ def parse_xml(xml):
     return exts, tables
 
 # ── Gemini: AI 시트명 분류 ─────────────────────────────────────────────────────
-def gemini_classify_tables(api_key:str, tables:list) -> dict:
+def gemini_classify_tables(api_key:str, tables:list, model_name:str='gemini-3-flash-preview') -> dict:
     """TABLE 목록 -> Gemini -> {table_idx: 추천시트명}"""
     if not api_key: return {}
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel(model_name)
         summaries=[]
         for tbl in tables[:60]:
             vals=[c['value'] for row in tbl['rows'][:3] for c in row if c['value'].strip()][:6]
@@ -155,13 +155,13 @@ JSON만 응답: {{"매핑":[{{"idx":0,"시트명":"예시"}}]}}"""
         print(f"[Gemini classify] {e}"); return {}
 
 # ── Gemini: AI 교차 검증 ──────────────────────────────────────────────────────
-def gemini_verify_excel(api_key:str, fin_data:dict, note_data:dict) -> str:
+def gemini_verify_excel(api_key:str, fin_data:dict, note_data:dict, model_name:str='gemini-3-flash-preview') -> str:
     """재무제표 + 주석 -> Gemini -> 교차검증 결과 텍스트"""
     if not api_key:
         return "❌ Gemini API 키가 없습니다."
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel(model_name)
         fin_text  = json.dumps(fin_data,  ensure_ascii=False, indent=2)[:8000]
         note_text = json.dumps(note_data, ensure_ascii=False, indent=2)[:8000]
         prompt=f"""당신은 한국 공인회계사(CPA) 수준의 재무제표 검증 전문가입니다.
@@ -618,8 +618,21 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
     <input class="api-input" id="apiKey" type="password"
       placeholder="AIza... (AI 기능 사용 시 입력 - 없어도 DSD 변환은 완벽 작동)"
       oninput="saveKey(this.value)" />
-    <span class="api-note">&#x1F4CC; 선택사항</span>
+    <select id="modelSel" onchange="saveModel(this.value)"
+      style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.25);
+             border-radius:6px;color:white;padding:4px 7px;font-size:11px;cursor:pointer;
+             outline:none;flex-shrink:0;min-width:0;">
+      <option value="gemini-3-flash-preview" style="background:#1a2e4a;color:white;">3 Flash &#x2605; 최신 (3월 출시)</option>
+      <option value="gemini-2.5-flash" style="background:#1a2e4a;color:white;">2.5 Flash</option>
+      <option value="gemini-2.0-flash" style="background:#1a2e4a;color:white;">2.0 Flash (6월 종료)</option>
+    </select>
+    <span class="api-note">&#128204; 선택사항</span>
     <span class="api-st" id="apiSt">&#x26AA; 미입력</span>
+    <button onclick="clearKey()"
+      style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);
+             color:white;border-radius:6px;padding:3px 8px;font-size:10px;cursor:pointer;white-space:nowrap;">
+      &#x2715; Key 삭제
+    </button>
   </div>
   <div style="margin-top:5px;font-size:10px;opacity:.75">
     &#x1F449; API Key 없이도 DSD&#8596;Excel 변환은 정상 작동합니다. &nbsp;|&nbsp;
@@ -809,6 +822,10 @@ function saveKey(v){localStorage.setItem('easydsd_gemini_key',v);updSt(v);}
 function updSt(v){const e=document.getElementById('apiSt');if(v&&v.length>10){e.textContent='🟢 입력됨';e.style.color='#a5d6a7';}else{e.textContent='⚪ 미입력';e.style.color='rgba(255,255,255,.6)';}}
 function getKey(){return localStorage.getItem('easydsd_gemini_key')||'';}
 function clearKey(){localStorage.removeItem('easydsd_gemini_key');document.getElementById('apiKey').value='';updSt('');}
+function saveModel(v){localStorage.setItem('easydsd_model',v);}
+function getModel(){return localStorage.getItem('easydsd_model')||'gemini-3-flash-preview';}
+function loadModel(){  const m=getModel();  const sel=document.getElementById('modelSel');  if(sel) sel.value=m;}
+loadModel();
 loadKey();
 
 // 하트비트
@@ -843,7 +860,7 @@ async function run1(){
   if(useAI&&!key){ser(1,'AI 분류를 사용하려면 Gemini API Key를 입력하세요.');document.getElementById('btn1').disabled=false;return;}
   sp(1,useAI?S1A[0]:S1[0],useAI);const iv=anim(1,useAI?S1A:S1,useAI);
   try{
-    const fd=new FormData();fd.append('dsd',F.f1);fd.append('ai_classify',useAI?'1':'0');fd.append('api_key',key);
+    const fd=new FormData();fd.append('dsd',F.f1);fd.append('ai_classify',useAI?'1':'0');fd.append('api_key',key);fd.append('model',getModel());
     const r=await fetch('/api/dsd2excel',{method:'POST',body:fd});
     clearInterval(iv);ep(1);
     if(!r.ok){const e=await r.json();throw new Error(e.error||'변환 실패');}
@@ -877,7 +894,7 @@ async function run3(){
   document.getElementById('btn3').disabled=true;
   sp(3,S3[0],true);const iv=anim(3,S3,true);
   try{
-    const fd=new FormData();fd.append('xlsx',F.f4);fd.append('api_key',key);
+    const fd=new FormData();fd.append('xlsx',F.f4);fd.append('api_key',key);fd.append('model',getModel());
     const r=await fetch('/api/verify_excel',{method:'POST',body:fd});
     clearInterval(iv);ep(3);
     if(!r.ok){const e=await r.json();throw new Error(e.error||'검증 실패');}
@@ -921,7 +938,8 @@ def api_dsd2excel():
 
             xml=zipfile.ZipFile(io.BytesIO(dsd_bytes)).read('contents.xml').decode('utf-8',errors='replace')
             _,tables=parse_xml(xml)
-            ai_mapping=gemini_classify_tables(api_key,tables)
+            model_name=request.form.get('model','gemini-3-flash-preview').strip()
+            ai_mapping=gemini_classify_tables(api_key,tables,model_name)
         xlsx=dsd_to_excel_bytes(dsd_bytes,ai_mapping or None)
         wb=openpyxl.load_workbook(io.BytesIO(xlsx),data_only=True)
         cells=sum(1 for ws in wb.worksheets for row in ws.iter_rows()
@@ -971,7 +989,8 @@ def api_verify_excel():
 
         fin_data,note_data=extract_fin_and_notes(xlsx_bytes)
         if not fin_data: return jsonify(error='재무제표 시트(🏦💹📈💰)를 찾을 수 없습니다.'),400
-        verify_result=gemini_verify_excel(api_key,fin_data,note_data)
+        model_name=request.form.get('model','gemini-3-flash-preview').strip()
+        verify_result=gemini_verify_excel(api_key,fin_data,note_data,model_name)
         wb=openpyxl.load_workbook(io.BytesIO(xlsx_bytes))
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)

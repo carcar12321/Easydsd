@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """easydsd v0.2 - DART 감사보고서 변환 도구 + Gemini AI"""
- 
+
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
- 
+
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
- 
+
 # ── 라이브러리 자동 설치 ───────────────────────────────────────────────────────
 try:
     from flask import Flask, request, send_file, jsonify, render_template_string
@@ -22,14 +22,14 @@ except ImportError:
     import openpyxl
     from openpyxl.styles import PatternFill, Font, Alignment
     from openpyxl.utils import get_column_letter
- 
+
 try:
     import google.generativeai as genai
     GENAI_AVAILABLE = True
 except ImportError:
     GENAI_AVAILABLE = False
     genai = None
- 
+
 # ── 기본 상수 ──────────────────────────────────────────────────────────────────
 def find_free_port(start=5000, end=5099):
     for port in range(start, end):
@@ -37,7 +37,7 @@ def find_free_port(start=5000, end=5099):
             if s.connect_ex(('127.0.0.1', port)) != 0:
                 return port
     return start
- 
+
 PORT       = find_free_port()
 EDIT_COLOR = 'FFF2CC'
 C = {'navy':'1F4E79','blue':'2E75B6','lblue':'DEEAF1',
@@ -54,28 +54,28 @@ EXT_DESC = {
     'GMSH_DATE':'주총일자(YYYYMMDD)','SUPV_OPIN':'감사의견코드',
     'AUDIT_CIK':'감사인CIK','CRP_RGS_NO':'법인등록번호',
 }
- 
+
 # ── 스타일 헬퍼 ────────────────────────────────────────────────────────────────
 def fill(c): return PatternFill('solid', fgColor=c)
 def fnt(color='000000',bold=False,size=9,italic=False):
     return Font(color=color,bold=bold,size=size,italic=italic)
 def aln(h='left',v='center',wrap=False):
     return Alignment(horizontal=h,vertical=v,wrap_text=wrap)
- 
+
 # ── XML 파싱 유틸 ──────────────────────────────────────────────────────────────
 def clean_cr(s, as_newline=False):
     repl = '\n' if as_newline else ' '
     s = s.replace('&amp;cr;', repl).replace('&cr;', repl)
     return re.sub(r'\s+', ' ', s).strip()
- 
+
 def clean_title(s):
     s = clean_cr(s, False)
     s = s.replace('&amp;','&').replace('&lt;','<').replace('&gt;','>').replace('&quot;','"')
     return re.sub(r'\s+', ' ', s).strip()
- 
+
 def is_blank_title(s):
     return len(re.sub(r'[&;a-z]+','',s).strip()) == 0
- 
+
 def parse_cell(m):
     attrs = m.group(1)
     val   = re.sub(r'<[^>]+>','',m.group(0))
@@ -85,14 +85,14 @@ def parse_cell(m):
     cs  = int(x.group(1)) if (x:=re.search(r'COLSPAN="(\d+)"',attrs)) else 1
     tag = re.match(r'<([A-Z]+)',m.group(0)).group(1)
     return dict(value=val, colspan=cs, tag=tag)
- 
+
 def is_num_or_decimal(val):
     v = (val.strip().replace(',','').replace('(','').replace(')','')
              .replace('%','').replace('-','').replace(' ','').split('\n')[0])
     if not v: return False
     try: float(v); return True
     except: return False
- 
+
 def parse_xml(xml):
     exts = re.findall(r'<EXTRACTION[^>]*ACODE="([^"]+)"[^>]*>([^<]+)</EXTRACTION>',xml)
     tables = []
@@ -112,7 +112,7 @@ def parse_xml(xml):
                            ctx_title=(ctx_titles[-1] if ctx_titles else ''),
                            rows=rows,start=tm.start()))
     return exts, tables
- 
+
 # ── Gemini: AI 시트명 분류 ─────────────────────────────────────────────────────
 def gemini_classify_tables(api_key:str, tables:list) -> dict:
     """TABLE 목록 → Gemini → {table_idx: 추천시트명}"""
@@ -127,10 +127,10 @@ def gemini_classify_tables(api_key:str, tables:list) -> dict:
         prompt=f"""한국 DART 감사보고서 TABLE 목록입니다. 각 TABLE의 엑셀 시트명을 제안해주세요.
 규칙: 재무상태표→"🏦재무상태표", 포괄손익→"💹포괄손익계산서", 자본변동→"📈자본변동표", 현금흐름→"💰현금흐름표",
 주석→"📝주석_[주제3~5자]", 서문/목차/감사의견→"📄서문", 시트명31자이내 특수문자(/\\*?[]:)불가
- 
+
 TABLE목록:
 {chr(10).join(summaries)}
- 
+
 JSON만 응답: {{"매핑":[{{"idx":0,"시트명":"예시"}}]}}"""
         resp=model.generate_content(prompt)
         m=re.search(r'\{.*\}',resp.text.strip(),re.DOTALL)
@@ -139,7 +139,7 @@ JSON만 응답: {{"매핑":[{{"idx":0,"시트명":"예시"}}]}}"""
         return {item['idx']:item['시트명'] for item in data.get('매핑',[])}
     except Exception as e:
         print(f"[Gemini classify] {e}"); return {}
- 
+
 # ── Gemini: AI 교차 검증 ──────────────────────────────────────────────────────
 def gemini_verify_excel(api_key:str, fin_data:dict, note_data:dict) -> str:
     """재무제표 + 주석 → Gemini → 교차검증 결과 텍스트"""
@@ -152,35 +152,35 @@ def gemini_verify_excel(api_key:str, fin_data:dict, note_data:dict) -> str:
         note_text = json.dumps(note_data, ensure_ascii=False, indent=2)[:8000]
         prompt=f"""당신은 한국 공인회계사(CPA) 수준의 재무제표 검증 전문가입니다.
 아래 재무제표 본문과 주석 데이터를 교차 검증해주세요.
- 
+
 [재무제표 본문]
 {fin_text}
- 
+
 [주석 데이터]
 {note_text}
- 
+
 검증 목표:
 1. 재무상태표 주요 계정 금액 ↔ 해당 주석 세부 합계 일치 여부
 2. 포괄손익계산서 항목 ↔ 주석 세부 내역 일치 여부
 3. 불일치·확인불가 항목 명시
- 
+
 응답 형식:
 ## ✅ 일치 항목
 (일치 항목 나열)
- 
+
 ## ❌ 불일치 항목
 (불일치 항목 + 차이 금액)
- 
+
 ## ⚠️ 확인 필요 항목
 (데이터 부족 등)
- 
+
 ## 📋 종합 의견
 (전체 요약)"""
         resp=model.generate_content(prompt)
         return resp.text.strip()
     except Exception as e:
         return f"❌ Gemini API 오류: {e}"
- 
+
 # ── Excel에서 재무/주석 데이터 추출 ───────────────────────────────────────────
 def extract_fin_and_notes(xlsx_bytes:bytes) -> tuple:
     wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
@@ -198,7 +198,7 @@ def extract_fin_and_notes(xlsx_bytes:bytes) -> tuple:
         elif sname.startswith('📝'):
             note_data[sname]=rows_data[:50]
     return fin_data, note_data
- 
+
 # ── DSD → Excel 변환 ───────────────────────────────────────────────────────────
 def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
     with zipfile.ZipFile(io.BytesIO(dsd_bytes)) as zf:
@@ -207,7 +207,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
     meta_xml = files.get('meta.xml',b'').decode('utf-8',errors='replace')
     exts, tables = parse_xml(xml)
     wb = openpyxl.Workbook()
- 
+
     # 사용안내
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
@@ -229,7 +229,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
         if bg: c.fill=fill(bg)
         c.alignment=aln('left',wrap=True); ws0.row_dimensions[ri].height=21
     ws0.column_dimensions['A'].width=65
- 
+
     # 요약수치
     ws_e=wb.create_sheet('📊요약수치'); ws_e.sheet_view.showGridLines=False
     for ci,(h,w) in enumerate([('ACODE',15),('값 (수정가능)',22),('설명',28)],1):
@@ -240,7 +240,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
         vc=ws_e.cell(ri,2,val); vc.fill=fill(C['yellow']); vc.alignment=aln('right')
         ws_e.cell(ri,3,EXT_DESC.get(code,'')).font=fnt(size=9,italic=True)
         ws_e.row_dimensions[ri].height=18
- 
+
     # 그룹핑
     FIN_ORDER=['🏦재무상태표','💹포괄손익계산서','📈자본변동표','💰현금흐름표']
     groups=[]; i=0
@@ -266,7 +266,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
         else:
             sname=f'📝{chunk_n:02d}_주석'
         groups.append((sname,chunk,True))
- 
+
     # 시트 생성 헬퍼
     def write_tables_to_sheet(ws,tbl_list,show_titles=False):
         er=1; max_cols_all=1; table_start_rows={}
@@ -309,7 +309,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
         ws.column_dimensions['A'].width=28
         for ci in range(2,max_cols_all+1): ws.column_dimensions[get_column_letter(ci)].width=18
         return table_start_rows
- 
+
     sheet_map=[]; used=set()
     for gitem in groups:
         sraw=gitem[0]; tbl_list=gitem[1]; show_t=gitem[2] if len(gitem)>2 else False
@@ -320,7 +320,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
         tsr=write_tables_to_sheet(ws,tbl_list,show_t)
         for tbl in tbl_list:
             sheet_map.append((sname,tbl['idx'],tsr.get(tbl['idx'],-1)))
- 
+
     # _원본XML
     ws_r=wb.create_sheet('_원본XML'); ws_r.sheet_view.showGridLines=False
     ws_r.cell(1,1,'이 시트는 DSD 복원에 필수입니다. 절대 수정/삭제 금지!').font=fnt(C['orange'],bold=True,size=9)
@@ -330,14 +330,14 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
     for ri,(sname,t_idx,excel_row) in enumerate(sheet_map,5):
         t=tables[t_idx]; ws_r.cell(ri,1,sname); ws_r.cell(ri,2,t_idx)
         ws_r.cell(ri,3,t['fin_label']); ws_r.cell(ri,4,t['ctx_title']); ws_r.cell(ri,5,excel_row)
- 
+
     buf=io.BytesIO(); wb.save(buf); return buf.getvalue()
- 
+
 # ── Excel → DSD 변환 ───────────────────────────────────────────────────────────
 def is_note_ref(val):
     parts=val.strip().split(',')
     return (len(parts)>=2 and all(p.strip().isdigit() and 1<=len(p.strip())<=2 for p in parts))
- 
+
 def normalize_num(val):
     v=str(val).strip()
     if not v or v in ('-',''): return v
@@ -348,20 +348,20 @@ def normalize_num(val):
     if cl.isdigit() and len(cl)>=3:
         fmt=f"{int(cl):,}"; v=f"({fmt})" if neg else fmt
     return v.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;')
- 
+
 def is_edit(cell):
     f=cell.fill
     if f and f.fill_type=='solid':
         fg=f.fgColor
         if fg and fg.type=='rgb': return fg.rgb.upper().endswith(EDIT_COLOR.upper())
     return False
- 
+
 def excel_to_dsd_bytes(orig_dsd_bytes:bytes, xlsx_bytes:bytes) -> bytes:
     with zipfile.ZipFile(io.BytesIO(orig_dsd_bytes)) as zf:
         orig_files={n:zf.read(n) for n in zf.namelist()}
     contents_xml=orig_files['contents.xml'].decode('utf-8',errors='replace')
     wb=openpyxl.load_workbook(io.BytesIO(xlsx_bytes),data_only=True)
- 
+
     mapping={}
     if '_원본XML' in wb.sheetnames:
         ws_r=wb['_원본XML']
@@ -370,7 +370,7 @@ def excel_to_dsd_bytes(orig_dsd_bytes:bytes, xlsx_bytes:bytes) -> bytes:
             sname=str(row[0]).strip(); t_idx=int(row[1])
             excel_row=int(row[4]) if len(row)>4 and row[4] is not None else -1
             if sname: mapping.setdefault(sname,[]).append((t_idx,excel_row))
- 
+
     exts={}; t_changes={}
     for sname in wb.sheetnames:
         if sname in ('📋사용안내','_원본XML','_meta'): continue
@@ -388,12 +388,12 @@ def excel_to_dsd_bytes(orig_dsd_bytes:bytes, xlsx_bytes:bytes) -> bytes:
                     if is_edit(cell) and cell.value is not None:
                         changes.append((ri,ci,str(cell.value)))
             if changes: t_changes[sname]=changes
- 
+
     for ext_code,val in exts.items():
         contents_xml=re.sub(
             rf'(<EXTRACTION[^>]*ACODE="{re.escape(ext_code)}"[^>]*>)[^<]+(</EXTRACTION>)',
             rf'\g<1>{val}\g<2>',contents_xml)
- 
+
     table_positions=[(m.start(),m.end())
                      for m in re.finditer(r'<TABLE[^>]*>.*?</TABLE>',contents_xml,re.DOTALL)]
     patches=[]
@@ -436,22 +436,22 @@ def excel_to_dsd_bytes(orig_dsd_bytes:bytes, xlsx_bytes:bytes) -> bytes:
                 last=tr_m.end(); td_row+=1
             rebuilt.append(tt[last:])
             patches.append((ts,te,''.join(rebuilt)))
- 
+
     result=contents_xml
     for ts,te,nt in sorted(patches,key=lambda x:-x[0]):
         result=result[:ts]+nt+result[te:]
- 
+
     buf=io.BytesIO()
     with zipfile.ZipFile(buf,'w',zipfile.ZIP_DEFLATED) as zf:
         for name,data in orig_files.items():
             if os.path.splitext(name)[1].lower() in ('.jpg','.jpeg','.png','.gif','.bmp'): continue
             zf.writestr(name,result.encode('utf-8') if name=='contents.xml' else data)
     return buf.getvalue()
- 
+
 # ── Flask 앱 ───────────────────────────────────────────────────────────────────
 app=Flask(__name__)
 app.config['MAX_CONTENT_LENGTH']=100*1024*1024
- 
+
 _last_ping=time.time()
 def _watchdog():
     time.sleep(12)
@@ -459,7 +459,7 @@ def _watchdog():
         time.sleep(2)
         if time.time()-_last_ping>8: os._exit(0)
 threading.Thread(target=_watchdog,daemon=True).start()
- 
+
 HTML=r'''<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -483,6 +483,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
 .api-input::placeholder{opacity:.5}
 .api-input:focus{background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
 .api-st{font-size:10px;white-space:nowrap;opacity:.8}
+.api-note{font-size:10px;white-space:nowrap;background:rgba(255,193,7,.3);border:1px solid rgba(255,193,7,.5);border-radius:10px;padding:2px 7px;color:#fff8e1;font-weight:600}
 .container{max-width:840px;margin:22px auto;padding:0 16px 60px}
 .tabs{display:flex;gap:3px}
 .tab{padding:9px 18px;border-radius:10px 10px 0 0;background:#cdd8e4;color:#4a6078;font-size:12px;font-weight:600;cursor:pointer;border:none;border-bottom:3px solid transparent;transition:all .2s}
@@ -599,12 +600,18 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
   <div class="api-bar">
     <label>&#129302; Gemini API Key</label>
     <input class="api-input" id="apiKey" type="password"
-      placeholder="AIza... (AI 기능 사용 시 입력. aistudio.google.com 에서 무료 발급)"
+      placeholder="AIza... (AI 기능 사용 시 입력 — 없어도 DSD 변환은 완벽 작동)"
       oninput="saveKey(this.value)" />
+    <span class="api-note">&#x1F4CC; 선택사항</span>
     <span class="api-st" id="apiSt">&#x26AA; 미입력</span>
   </div>
+  <div style="margin-top:5px;font-size:10px;opacity:.75">
+    &#x1F449; API Key 없이도 DSD&#8596;Excel 변환은 정상 작동합니다. &nbsp;|&nbsp;
+    <a href="https://aistudio.google.com/app/apikey" target="_blank"
+       style="color:#a5d6a7;font-weight:600;">1분 만에 무료 API 키 발급받는 방법 &#x2197;</a>
+  </div>
 </div>
- 
+
 <div class="modal-overlay" id="killModal">
   <div class="modal">
     <h3>&#x26A0;&#xFE0F; 종료할까요?</h3>
@@ -615,7 +622,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
     </div>
   </div>
 </div>
- 
+
 <div class="container">
   <div class="tabs">
     <button class="tab active" onclick="sw(0)">&#9312; DSD &#8594; Excel</button>
@@ -624,7 +631,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
     <button class="tab dev-tab" onclick="sw(3)">개발자 정보</button>
   </div>
   <div class="card">
- 
+
     <!-- 탭① DSD→Excel -->
     <div class="tab-content active" id="tab0">
       <div class="step">
@@ -663,7 +670,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       </div>
       <div class="result err" id="er1"><div class="r-icon">&#10060;</div><div class="r-body"><div class="r-title">변환 실패</div><div class="r-sub" id="er1m"></div></div></div>
     </div>
- 
+
     <!-- 탭② Excel→DSD -->
     <div class="tab-content" id="tab1">
       <div class="step">
@@ -701,9 +708,13 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       </div>
       <div class="result err" id="er2"><div class="r-icon">&#10060;</div><div class="r-body"><div class="r-title">변환 실패</div><div class="r-sub" id="er2m"></div></div></div>
     </div>
- 
+
     <!-- 탭③ AI 검증 -->
     <div class="tab-content" id="tab2">
+      <div style="background:#f3e5f5;border:1px solid #ce93d8;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:11px;color:#4a148c;line-height:1.6">
+        &#x2139;&#xFE0F; <b>이 기능은 선택사항입니다.</b> Gemini API Key를 입력한 사용자만 이용할 수 있습니다.<br>
+        API Key가 없어도 &#9312; DSD&#8594;Excel, &#9313; Excel&#8594;DSD 변환은 완벽히 작동합니다.
+      </div>
       <div class="ai-hdr">
         <div class="ai-ico">&#129302;</div>
         <div><h3>AI 재무제표 교차 검증</h3><p>Gemini AI가 재무제표 본문↔주석 금액 일치 여부를 자동으로 검증합니다</p></div>
@@ -733,7 +744,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       <div class="result err" id="er3"><div class="r-icon">&#10060;</div><div class="r-body"><div class="r-title">검증 실패</div><div class="r-sub" id="er3m"></div></div></div>
       <div class="vr-box" id="vrBox"><h4>&#129302; AI 검증 결과 미리보기</h4><pre id="vrText"></pre></div>
     </div>
- 
+
     <!-- 탭④ 개발자 -->
     <div class="tab-content" id="tab3">
       <div class="dev-profile">
@@ -771,10 +782,10 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
         <div class="fi"><div class="fic">&#128163;</div><div>하트비트 감시 — 브라우저 닫으면 서버 자동 종료 (좀비 방지)</div></div>
       </div>
     </div>
- 
+
   </div>
 </div>
- 
+
 <script>
 // API Key
 function loadKey(){const k=localStorage.getItem('gemini_api_key')||'';document.getElementById('apiKey').value=k;updSt(k);return k;}
@@ -782,10 +793,10 @@ function saveKey(v){localStorage.setItem('gemini_api_key',v);updSt(v);}
 function updSt(v){const e=document.getElementById('apiSt');if(v&&v.length>10){e.textContent='🟢 입력됨';e.style.color='#a5d6a7';}else{e.textContent='⚪ 미입력';e.style.color='rgba(255,255,255,.6)';}}
 function getKey(){return localStorage.getItem('gemini_api_key')||'';}
 loadKey();
- 
+
 // 하트비트
 setInterval(function(){fetch('/api/heartbeat',{method:'POST'}).catch(function(){});},2500);
- 
+
 // 파일/드래그
 const F={f1:null,f2:null,f3:null,f4:null};
 function sw(n){document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',i===n));document.querySelectorAll('.tab-content').forEach((t,i)=>t.classList.toggle('active',i===n));}
@@ -795,7 +806,7 @@ function dlv(id){document.getElementById(id).classList.remove('drag-over')}
 function ddrop(e,fid,did){e.preventDefault();dlv(did);const dt=e.dataTransfer;if(!dt.files.length)return;const inp=document.getElementById(fid);const tr=new DataTransfer();tr.items.add(dt.files[0]);inp.files=tr.files;sf(fid,fid.replace('f','fb'),did);}
 function chk(){document.getElementById('btn1').disabled=!F.f1;document.getElementById('btn2').disabled=!(F.f2&&F.f3);document.getElementById('btn3').disabled=!F.f4;}
 function hide(n){['ok','er'].forEach(p=>document.getElementById(p+n).style.display='none');}
- 
+
 let piv=null;
 function sp(n,msg,isAI){hide(n);if(n===3)document.getElementById('vrBox').style.display='none';const pw=document.getElementById('pw'+n);pw.style.display='block';document.getElementById('pt'+n).textContent=msg;document.getElementById('pf'+n).style.width='0%';let w=0;piv=setInterval(()=>{w=Math.min(w+(isAI?1:4),88);document.getElementById('pf'+n).style.width=w+'%';},isAI?400:200);}
 function ep(n){clearInterval(piv);document.getElementById('pf'+n).style.width='100%';setTimeout(()=>document.getElementById('pw'+n).style.display='none',500);}
@@ -806,7 +817,7 @@ const S1A=['DSD 분석 중...','Gemini AI 분류 중... (15~30초 소요)','AI �
 const S2=['매핑 구성 중...','XML 패치 적용 중...','DSD 생성 중...'];
 const S3=['Excel 데이터 추출 중...','Gemini AI 교차 검증 중... (30~60초 소요)','검증 결과 시트 생성 중...'];
 function anim(n,steps,isAI){let i=0;return setInterval(()=>{if(i<steps.length)document.getElementById('pt'+n).textContent=steps[i++];},isAI?5000:1000);}
- 
+
 async function run1(){
   if(!F.f1)return;
   document.getElementById('btn1').disabled=true;
@@ -825,7 +836,7 @@ async function run1(){
   }catch(e){clearInterval(iv);ep(1);ser(1,e.message);}
   document.getElementById('btn1').disabled=false;
 }
- 
+
 async function run2(){
   if(!F.f2||!F.f3)return;
   document.getElementById('btn2').disabled=true;
@@ -841,7 +852,7 @@ async function run2(){
   }catch(e){clearInterval(iv);ep(2);ser(2,e.message);}
   document.getElementById('btn2').disabled=false;
 }
- 
+
 async function run3(){
   if(!F.f4)return;
   const key=getKey();
@@ -860,26 +871,26 @@ async function run3(){
   }catch(e){clearInterval(iv);ep(3);ser(3,e.message);}
   document.getElementById('btn3').disabled=false;
 }
- 
+
 function showKill(){document.getElementById('killModal').classList.add('show')}
 function hideKill(){document.getElementById('killModal').classList.remove('show')}
 async function doKill(){hideKill();try{await fetch('/api/shutdown',{method:'POST'});}catch(e){}document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#556;font-size:15px;">서버가 종료되었습니다. 이 탭을 닫으세요.</div>';}
 </script>
 </body>
 </html>'''
- 
+
 @app.route('/')
 def index(): return render_template_string(HTML)
- 
+
 @app.route('/api/heartbeat', methods=['POST'])
 def api_heartbeat():
     global _last_ping; _last_ping=time.time(); return jsonify(ok=True)
- 
+
 @app.route('/api/shutdown', methods=['POST'])
 def api_shutdown():
     threading.Thread(target=lambda:(time.sleep(0.3),os._exit(0)),daemon=True).start()
     return jsonify(ok=True)
- 
+
 @app.route('/api/dsd2excel', methods=['POST'])
 def api_dsd2excel():
     try:
@@ -904,7 +915,7 @@ def api_dsd2excel():
         resp.headers['X-Info']=json.dumps({'sheets':len(wb.sheetnames),'cells':cells,'fin':len(fin),'ai':bool(ai_mapping)})
         return resp
     except Exception as e: return jsonify(error=str(e)),500
- 
+
 @app.route('/api/excel2dsd', methods=['POST'])
 def api_excel2dsd():
     try:
@@ -930,7 +941,7 @@ def api_excel2dsd():
         resp.headers['X-Info']=json.dumps({'tables':tb,'cells':tc,'xml_ok':xml_ok})
         return resp
     except Exception as e: return jsonify(error=str(e)),500
- 
+
 @app.route('/api/verify_excel', methods=['POST'])
 def api_verify_excel():
     try:
@@ -972,11 +983,11 @@ def api_verify_excel():
         resp.headers['X-Info']=json.dumps({'fin_sheets':len(fin_data),'note_sheets':len(note_data),'preview':preview})
         return resp
     except Exception as e: return jsonify(error=str(e)),500
- 
+
 def open_browser():
     time.sleep(1.5)
     webbrowser.open(f'http://127.0.0.1:{PORT}')
- 
+
 if __name__=='__main__':
     print('='*52)
     print('  easydsd v0.2 - DART 감사보고서 변환 + AI')
@@ -987,4 +998,3 @@ if __name__=='__main__':
         print('  ⚠️  google-generativeai 미설치 — AI 기능 비활성')
     threading.Thread(target=open_browser,daemon=True).start()
     app.run(host='127.0.0.1',port=PORT,debug=False)
- 

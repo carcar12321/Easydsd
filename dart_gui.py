@@ -4,6 +4,14 @@
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
+# Windows 콘솔 인코딩을 UTF-8로 강제 설정 (cp949 오류 방지)
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -16,7 +24,7 @@ try:
     from openpyxl.styles import PatternFill, Font, Alignment
     from openpyxl.utils import get_column_letter
 except ImportError:
-    if not getattr(sys, 'frozen', False):  # EXE가 아닐 때만 자동 설치
+    if not (getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS')):  # EXE 아닐 때만
         import subprocess
         subprocess.check_call([sys.executable,'-m','pip','install','flask','openpyxl','-q'])
         from flask import Flask, request, send_file, jsonify, render_template_string
@@ -27,31 +35,42 @@ except ImportError:
         print("[오류] 필수 라이브러리 누락. EXE를 다시 빌드하세요.")
         sys.exit(1)
 
-try:
-    import google.generativeai as genai
-    GENAI_AVAILABLE = True
-except ImportError:
-    if not getattr(sys, 'frozen', False):
-        # Python 스크립트 실행 시: 자동 설치 시도
-        print("  google-generativeai 설치 중... (최초 1회)")
-        try:
-            import subprocess
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install",
-                 "google-generativeai", "grpcio", "--quiet"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            import google.generativeai as genai
-            GENAI_AVAILABLE = True
-            print("  google-generativeai 설치 완료!")
-        except Exception as _e:
-            print(f"  google-generativeai 설치 실패 ({_e}) — AI 기능 비활성")
-            GENAI_AVAILABLE = False
-            genai = None
-    else:
-        # EXE 실행 시: 설치 불가, 그냥 비활성 처리
-        GENAI_AVAILABLE = False
-        genai = None
+def _try_import_genai():
+    """google-generativeai import 시도. 없으면 자동 설치 후 재시도."""
+    try:
+        import google.generativeai as _genai
+        return _genai, True
+    except ImportError:
+        pass
+
+    # EXE(PyInstaller) 환경에서는 절대 pip 실행 안 함
+    # sys.frozen 또는 sys._MEIPASS 로 판별
+    if getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS'):
+        return None, False
+
+    # 자동 설치 시도
+    print("  google-generativeai 설치 중... (최초 1회, 1~2분 소요)")
+    try:
+        import subprocess, importlib, site
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install",
+             "google-generativeai", "grpcio", "--quiet", "--user"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        # 새로 설치된 패키지 경로를 sys.path에 즉시 반영
+        importlib.invalidate_caches()
+        user_site = site.getusersitepackages()
+        if user_site not in sys.path:
+            sys.path.insert(0, user_site)
+        import google.generativeai as _genai
+        print("  [OK] google-generativeai 설치 완료!")
+        return _genai, True
+    except Exception as _e:
+        print(f"  google-generativeai 설치 실패 - AI 기능 비활성")
+        print(f"  수동 설치: pip install google-generativeai")
+        return None, False
+
+genai, GENAI_AVAILABLE = _try_import_genai()
 
 # ── 기본 상수 ──────────────────────────────────────────────────────────────────
 def find_free_port(start=5000, end=5099):
@@ -138,7 +157,7 @@ def parse_xml(xml):
 
 # ── Gemini: AI 시트명 분류 ─────────────────────────────────────────────────────
 def gemini_classify_tables(api_key:str, tables:list) -> dict:
-    """TABLE 목록 → Gemini → {table_idx: 추천시트명}"""
+    """TABLE 목록 -> Gemini -> {table_idx: 추천시트명}"""
     if not GENAI_AVAILABLE or not api_key: return {}
     try:
         genai.configure(api_key=api_key)
@@ -148,8 +167,8 @@ def gemini_classify_tables(api_key:str, tables:list) -> dict:
             vals=[c['value'] for row in tbl['rows'][:3] for c in row if c['value'].strip()][:6]
             summaries.append(f"TABLE[{tbl['idx']}] ctx={tbl['ctx_title']!r} fin={tbl['fin_label']!r} 샘플={vals}")
         prompt=f"""한국 DART 감사보고서 TABLE 목록입니다. 각 TABLE의 엑셀 시트명을 제안해주세요.
-규칙: 재무상태표→"🏦재무상태표", 포괄손익→"💹포괄손익계산서", 자본변동→"📈자본변동표", 현금흐름→"💰현금흐름표",
-주석→"📝주석_[주제3~5자]", 서문/목차/감사의견→"📄서문", 시트명31자이내 특수문자(/\\*?[]:)불가
+규칙: 재무상태표->"🏦재무상태표", 포괄손익->"💹포괄손익계산서", 자본변동->"📈자본변동표", 현금흐름->"💰현금흐름표",
+주석->"📝주석_[주제3~5자]", 서문/목차/감사의견->"📄서문", 시트명31자이내 특수문자(/\\*?[]:)불가
 
 TABLE목록:
 {chr(10).join(summaries)}
@@ -165,7 +184,7 @@ JSON만 응답: {{"매핑":[{{"idx":0,"시트명":"예시"}}]}}"""
 
 # ── Gemini: AI 교차 검증 ──────────────────────────────────────────────────────
 def gemini_verify_excel(api_key:str, fin_data:dict, note_data:dict) -> str:
-    """재무제표 + 주석 → Gemini → 교차검증 결과 텍스트"""
+    """재무제표 + 주석 -> Gemini -> 교차검증 결과 텍스트"""
     if not GENAI_AVAILABLE or not api_key:
         return "❌ Gemini API 키가 없거나 라이브러리가 설치되지 않았습니다."
     try:
@@ -183,8 +202,8 @@ def gemini_verify_excel(api_key:str, fin_data:dict, note_data:dict) -> str:
 {note_text}
 
 검증 목표:
-1. 재무상태표 주요 계정 금액 ↔ 해당 주석 세부 합계 일치 여부
-2. 포괄손익계산서 항목 ↔ 주석 세부 내역 일치 여부
+1. 재무상태표 주요 계정 금액 <-> 해당 주석 세부 합계 일치 여부
+2. 포괄손익계산서 항목 <-> 주석 세부 내역 일치 여부
 3. 불일치·확인불가 항목 명시
 
 응답 형식:
@@ -222,7 +241,7 @@ def extract_fin_and_notes(xlsx_bytes:bytes) -> tuple:
             note_data[sname]=rows_data[:50]
     return fin_data, note_data
 
-# ── DSD → Excel 변환 ───────────────────────────────────────────────────────────
+# ── DSD -> Excel 변환 ───────────────────────────────────────────────────────────
 def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
     with zipfile.ZipFile(io.BytesIO(dsd_bytes)) as zf:
         files={n:zf.read(n) for n in zf.namelist()}
@@ -238,7 +257,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
-        ('  2. 저장 후 "Excel → DSD" 탭에서 변환하세요',False,'000000',C['white'],10),
+        ('  2. 저장 후 "Excel -> DSD" 탭에서 변환하세요',False,'000000',C['white'],10),
         ('',False,'','',8),
         ('【 색상 범례 】',True,C['navy'],C['lblue'],11),
         ('  노란색 = 수정 가능 (금액, 주주명, 지분율, 텍스트 모두)',False,'000000',C['yellow'],10),
@@ -356,7 +375,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
 
     buf=io.BytesIO(); wb.save(buf); return buf.getvalue()
 
-# ── Excel → DSD 변환 ───────────────────────────────────────────────────────────
+# ── Excel -> DSD 변환 ───────────────────────────────────────────────────────────
 def is_note_ref(val):
     parts=val.strip().split(',')
     return (len(parts)>=2 and all(p.strip().isdigit() and 1<=len(p.strip())<=2 for p in parts))
@@ -625,7 +644,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
   <div class="api-bar">
     <label>&#129302; Gemini API Key</label>
     <input class="api-input" id="apiKey" type="password"
-      placeholder="AIza... (AI 기능 사용 시 입력 — 없어도 DSD 변환은 완벽 작동)"
+      placeholder="AIza... (AI 기능 사용 시 입력 - 없어도 DSD 변환은 완벽 작동)"
       oninput="saveKey(this.value)" />
     <span class="api-note">&#x1F4CC; 선택사항</span>
     <span class="api-st" id="apiSt">&#x26AA; 미입력</span>
@@ -657,7 +676,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
   </div>
   <div class="card">
 
-    <!-- 탭① DSD→Excel -->
+    <!-- 탭① DSD->Excel -->
     <div class="tab-content active" id="tab0">
       <div class="step">
         <div class="step-num">1</div>
@@ -696,7 +715,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       <div class="result err" id="er1"><div class="r-icon">&#10060;</div><div class="r-body"><div class="r-title">변환 실패</div><div class="r-sub" id="er1m"></div></div></div>
     </div>
 
-    <!-- 탭② Excel→DSD -->
+    <!-- 탭② Excel->DSD -->
     <div class="tab-content" id="tab1">
       <div class="step">
         <div class="step-num">1</div>
@@ -742,7 +761,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       </div>
       <div class="ai-hdr">
         <div class="ai-ico">&#129302;</div>
-        <div><h3>AI 재무제표 교차 검증</h3><p>Gemini AI가 재무제표 본문↔주석 금액 일치 여부를 자동으로 검증합니다</p></div>
+        <div><h3>AI 재무제표 교차 검증</h3><p>Gemini AI가 재무제표 본문<->주석 금액 일치 여부를 자동으로 검증합니다</p></div>
       </div>
       <div class="step">
         <div class="step-num">1</div>
@@ -800,11 +819,11 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       <div class="fs">
         <h3>&#10024; 주요 기능</h3>
         <div class="fi"><div class="fic">&#127974;</div><div>재무상태표·포괄손익·자본변동표·현금흐름표 전체 편집</div></div>
-        <div class="fi"><div class="fic">&#128221;</div><div>주석 전체 편집 — 주주명, 지분율, 이자율, 텍스트 포함</div></div>
-        <div class="fi"><div class="fic">&#129302;</div><div>Gemini AI 스마트 분류 — DSD→Excel 변환 시 시트명 자동 정렬</div></div>
-        <div class="fi"><div class="fic">&#128269;</div><div>AI 교차 검증 — 재무제표 본문↔주석 금액 일치 여부 자동 확인 후 Excel 시트로 저장</div></div>
-        <div class="fi"><div class="fic">&#128260;</div><div>DSD→Excel→DSD 완전한 양방향 변환, XML 유효성 자동 검증</div></div>
-        <div class="fi"><div class="fic">&#128163;</div><div>하트비트 감시 — 브라우저 닫으면 서버 자동 종료 (좀비 방지)</div></div>
+        <div class="fi"><div class="fic">&#128221;</div><div>주석 전체 편집 - 주주명, 지분율, 이자율, 텍스트 포함</div></div>
+        <div class="fi"><div class="fic">&#129302;</div><div>Gemini AI 스마트 분류 - DSD->Excel 변환 시 시트명 자동 정렬</div></div>
+        <div class="fi"><div class="fic">&#128269;</div><div>AI 교차 검증 - 재무제표 본문<->주석 금액 일치 여부 자동 확인 후 Excel 시트로 저장</div></div>
+        <div class="fi"><div class="fic">&#128260;</div><div>DSD->Excel->DSD 완전한 양방향 변환, XML 유효성 자동 검증</div></div>
+        <div class="fi"><div class="fic">&#128163;</div><div>하트비트 감시 - 브라우저 닫으면 서버 자동 종료 (좀비 방지)</div></div>
       </div>
     </div>
 
@@ -1024,6 +1043,6 @@ if __name__=='__main__':
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*52)
     if not GENAI_AVAILABLE:
-        print('  ⚠️  google-generativeai 미설치 — AI 기능 비활성')
+        print('  [!] google-generativeai 미설치 - AI 기능 비활성')
     threading.Thread(target=open_browser,daemon=True).start()
     app.run(host='127.0.0.1',port=PORT,debug=False)

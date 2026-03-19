@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.2 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.4 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -27,8 +27,21 @@ try:
     import google.generativeai as genai
     GENAI_AVAILABLE = True
 except ImportError:
-    GENAI_AVAILABLE = False
-    genai = None
+    print("  google-generativeai 설치 중... (최초 1회)")
+    try:
+        import subprocess
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install",
+             "google-generativeai", "grpcio", "--quiet"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        import google.generativeai as genai
+        GENAI_AVAILABLE = True
+        print("  google-generativeai 설치 완료!")
+    except Exception as _e:
+        print(f"  google-generativeai 설치 실패 ({_e}) — AI 기능 비활성")
+        GENAI_AVAILABLE = False
+        genai = None
 
 # ── 기본 상수 ──────────────────────────────────────────────────────────────────
 def find_free_port(start=5000, end=5099):
@@ -211,7 +224,7 @@ def dsd_to_excel_bytes(dsd_bytes:bytes, ai_mapping:dict=None) -> bytes:
     # 사용안내
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.2)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.4)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -465,7 +478,7 @@ HTML=r'''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.2</title>
+<title>easydsd v0.4</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -590,10 +603,10 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &#8596; Excel 양방향 변환 &nbsp;&#xB7;&nbsp; Gemini AI 검증 &nbsp;&#xB7;&nbsp; easydsd v0.2</p>
+      <p>DSD &#8596; Excel 양방향 변환 &nbsp;&#xB7;&nbsp; Gemini AI 검증 &nbsp;&#xB7;&nbsp; easydsd v0.4</p>
     </div>
     <div class="hd-right">
-      <div class="hd-badge">v0.2</div>
+      <div class="hd-badge">v0.4</div>
       <button class="kill-btn" onclick="showKill()">&#x23FC; 종료</button>
     </div>
   </div>
@@ -750,10 +763,10 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       <div class="dev-profile">
         <div class="dev-avatar">&#127970;</div>
         <div class="dev-info">
-          <h2>Easydsd 0.2v</h2>
+          <h2>Easydsd 0.4v</h2>
           <div class="dev-sub">DART 감사보고서 DSD 파일 변환 도구(양방향) + Gemini AI</div>
           <div class="dev-badges">
-            <span class="badge bg">v0.2</span>
+            <span class="badge bg">v0.4</span>
             <span class="badge bg-gold">&#129302; AI-Powered</span>
             <span class="badge bg-tech">Python+Flask</span>
             <span class="badge bg-ai">Gemini 1.5</span>
@@ -762,7 +775,7 @@ body{font-family:'Malgun Gothic','맑은 고딕',sans-serif;background:#f0f4f8;c
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자 연락처</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.2v</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.4v</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 1.5 Flash</div></div>
       </div>
@@ -898,7 +911,11 @@ def api_dsd2excel():
         ai_classify = request.form.get('ai_classify','0')=='1'
         api_key     = request.form.get('api_key','').strip()
         ai_mapping  = {}
-        if ai_classify and api_key and GENAI_AVAILABLE:
+        if ai_classify:
+            if not api_key:
+                return jsonify(error='AI 분류를 사용하려면 Gemini API Key를 입력해주세요.'), 400
+            if not GENAI_AVAILABLE:
+                return jsonify(error='google-generativeai 라이브러리가 설치되지 않았습니다.\n실행.bat을 닫고 cmd에서 "pip install google-generativeai" 실행 후 다시 시도해주세요.'), 500
             xml=zipfile.ZipFile(io.BytesIO(dsd_bytes)).read('contents.xml').decode('utf-8',errors='replace')
             _,tables=parse_xml(xml)
             ai_mapping=gemini_classify_tables(api_key,tables)
@@ -990,7 +1007,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*52)
-    print('  easydsd v0.2 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.4 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*52)

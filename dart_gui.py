@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.91 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.92 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -140,26 +140,55 @@ def safe_fmt(v, fmt=',.0f', fallback='없음'):
         return fallback
 
 
-# ── 기능1: 롤오버 (수정된 버전) ───────────────────────────────────────────────
+# ── 기능1: 롤오버 v0.92 — 정교한 Column 지정 롤오버 ──────────────────────────
 def _rollover_sheet(ws, fill_000=True):
     """
-    단일 시트 롤오버:
-    - yellow 숫자 셀 앞절반(당기) → 뒷절반(전기)으로 복사
-    - 당기 자리에 0 채우기 (fill_000=True)
+    Column-targeted 롤오버 (v0.92 버그픽스):
+
+    [이전 버그]
+    - '5,32,33' 같은 주석 참조 번호가 숫자로 오인되어
+      '과목/주석 열' 데이터가 금액 열로 침범 → 데이터 파괴
+
+    [수정 로직]
+    1. 각 행에서 yellow 셀 중 '금액 셀'만 정확히 추출:
+       - is_note_ref() 필터: '5,32,33' 같은 주석 참조 번호 제외
+       - 4자리 이상 숫자만 인정 (소액 번호류 추가 배제)
+    2. 추출된 금액 셀을 열 번호 오름차순으로 정렬
+    3. [마지막-1] = 당기열,  [마지막] = 전기열  로 타겟팅
+       → 좌측 과목명/주석번호 열은 1픽셀도 건드리지 않음
+    4. 당기값 → 전기열 복사, 당기열 = "000" 채우기
     """
     for rowi in range(1, ws.max_row+1):
-        num_cells=[]
+        amt_cells = []          # (col_idx, cell) — 순수 금액 셀만
         for ci in range(1, ws.max_column+1):
-            cell=ws.cell(rowi,ci)
-            if is_edit(cell) and cell.value is not None:
-                v=str(cell.value).strip().replace(',','').replace('(','').replace(')','').replace('-','')
-                if v and v.replace('.','').isdigit() and len(v)>=3:
-                    num_cells.append((ci,cell))
-        if len(num_cells)<2: continue
-        half=len(num_cells)//2
-        for (_cc,c_cell),(_pc,p_cell) in zip(num_cells[:half],num_cells[half:]):
-            p_cell.value=c_cell.value
-            c_cell.value="000" if fill_000 else None
+            cell = ws.cell(rowi, ci)
+            if not is_edit(cell) or cell.value is None:
+                continue
+            raw = str(cell.value).strip()
+
+            # ── 주석 참조 번호 완전 배제 ('5,32,33' 등) ──────────────
+            if is_note_ref(raw):
+                continue
+
+            # ── 콤마/괄호/부호 제거 후 순수 숫자 + 4자리 이상 ───────
+            vclean = (raw.replace(',','').replace('(','')
+                         .replace(')','').replace('-','').replace(' ',''))
+            if vclean and vclean.replace('.','').isdigit() and len(vclean) >= 4:
+                amt_cells.append((ci, cell))
+
+        # 금액 셀이 2개 미만이면 롤오버 불가 (소계행·비어있는행 등)
+        if len(amt_cells) < 2:
+            continue
+
+        # ── 열 인덱스 오름차순 정렬 후 마지막 두 열 타겟팅 ─────────
+        # 뒤에서 두 번째 = 당기열,  마지막 = 전기열
+        amt_cells.sort(key=lambda x: x[0])
+        _cc, c_cell = amt_cells[-2]   # 당기
+        _pc, p_cell = amt_cells[-1]   # 전기
+
+        # ── 당기 → 전기 복사, 당기 = "000" ─────────────────────────
+        p_cell.value = c_cell.value
+        c_cell.value = "000" if fill_000 else None
 
 
 def apply_rollover_smart(wb, api_key='', model_name='gemini-3-flash-preview'):
@@ -627,7 +656,7 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     # 사용안내 (요약수치 시트 없음)
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.91)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.92)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -863,7 +892,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.91</title>
+<title>easydsd v0.92</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -1028,7 +1057,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.91</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.92</p>
     </div>
     <div class="hd-right">
       <div class="hd-badge">v0.9</div>
@@ -1294,7 +1323,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       <div class="dev-pro">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>Easydsd 0.91v</h2>
+          <h2>Easydsd 0.92v</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + 전기금액 검증 + DSD 비교</div>
           <div class="dev-bg">
             <span class="badge bg0">v0.9</span>
@@ -1306,7 +1335,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.91v</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.92v</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -1576,7 +1605,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)
         ws_v.sheet_view.showGridLines=False
-        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.91)')
+        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.92)')
         tc.fill=PatternFill('solid',fgColor='4A148C'); tc.font=Font(color='FFFFFF',bold=True,size=12)
         tc.alignment=Alignment(horizontal='left',vertical='center')
         ws_v.merge_cells('A1:F1'); ws_v.row_dimensions[1].height=28
@@ -1738,7 +1767,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*54)
-    print('  easydsd v0.91 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.92 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)

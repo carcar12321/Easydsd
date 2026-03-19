@@ -16,30 +16,40 @@ try:
     from openpyxl.styles import PatternFill, Font, Alignment
     from openpyxl.utils import get_column_letter
 except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable,'-m','pip','install','flask','openpyxl','-q'])
-    from flask import Flask, request, send_file, jsonify, render_template_string
-    import openpyxl
-    from openpyxl.styles import PatternFill, Font, Alignment
-    from openpyxl.utils import get_column_letter
+    if not getattr(sys, 'frozen', False):  # EXE가 아닐 때만 자동 설치
+        import subprocess
+        subprocess.check_call([sys.executable,'-m','pip','install','flask','openpyxl','-q'])
+        from flask import Flask, request, send_file, jsonify, render_template_string
+        import openpyxl
+        from openpyxl.styles import PatternFill, Font, Alignment
+        from openpyxl.utils import get_column_letter
+    else:
+        print("[오류] 필수 라이브러리 누락. EXE를 다시 빌드하세요.")
+        sys.exit(1)
 
 try:
     import google.generativeai as genai
     GENAI_AVAILABLE = True
 except ImportError:
-    print("  google-generativeai 설치 중... (최초 1회)")
-    try:
-        import subprocess
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install",
-             "google-generativeai", "grpcio", "--quiet"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        import google.generativeai as genai
-        GENAI_AVAILABLE = True
-        print("  google-generativeai 설치 완료!")
-    except Exception as _e:
-        print(f"  google-generativeai 설치 실패 ({_e}) — AI 기능 비활성")
+    if not getattr(sys, 'frozen', False):
+        # Python 스크립트 실행 시: 자동 설치 시도
+        print("  google-generativeai 설치 중... (최초 1회)")
+        try:
+            import subprocess
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install",
+                 "google-generativeai", "grpcio", "--quiet"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            import google.generativeai as genai
+            GENAI_AVAILABLE = True
+            print("  google-generativeai 설치 완료!")
+        except Exception as _e:
+            print(f"  google-generativeai 설치 실패 ({_e}) — AI 기능 비활성")
+            GENAI_AVAILABLE = False
+            genai = None
+    else:
+        # EXE 실행 시: 설치 불가, 그냥 비활성 처리
         GENAI_AVAILABLE = False
         genai = None
 
@@ -467,7 +477,9 @@ app.config['MAX_CONTENT_LENGTH']=100*1024*1024
 
 _last_ping=time.time()
 def _watchdog():
-    time.sleep(12)
+    # EXE는 압축 해제에 시간이 걸리므로 더 여유있게
+    startup_grace = 30 if getattr(sys, 'frozen', False) else 12
+    time.sleep(startup_grace)
     while True:
         time.sleep(2)
         if time.time()-_last_ping>8: os._exit(0)

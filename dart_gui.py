@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.05 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.06 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -1040,7 +1040,7 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     # 사용안내 (요약수치 시트 없음)
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.05)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.06)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -1367,7 +1367,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.05</title>
+<title>easydsd v0.06</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -1542,7 +1542,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.05</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.06</p>
     </div>
     <div class="hd-right">
       <div class="hd-badge">v0.01</div>
@@ -1848,7 +1848,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       <div class="dev-pro">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>easydsd v0.05</h2>
+          <h2>easydsd v0.06</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + 전기금액 검증 + DSD 비교</div>
           <div class="dev-bg">
             <span class="badge bg0">v0.01</span>
@@ -1860,7 +1860,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">easydsd v0.05</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">easydsd v0.06</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -1892,7 +1892,7 @@ function getKey(){return localStorage.getItem('easydsd_k')||'';}
 function saveKeyAnt(v){if(v)localStorage.setItem('easydsd_ka',v);else localStorage.removeItem('easydsd_ka');updStAnt(v);}
 function clearKeyAnt(){localStorage.removeItem('easydsd_ka');document.getElementById('apiKeyAnt').value='';updStAnt('');}
 function getKeyAnt(){return localStorage.getItem('easydsd_ka')||'';}
-function updStAnt(v){var e=document.getElementById('apiStAnt');if(v&&v.length>10){e.textContent='\uD83D\uDFE2 \uc785\ub825\ub428';e.style.color='#a5d6a7';}else{e.textContent='\u26AA \ubbf8\uc785\ub825';e.style.color='rgba(255,255,255,.6)';}}
+function updStAnt(v){var e=document.getElementById('apiStAnt');if(v&&v.length>10){e.textContent='&#x1F7E2; \uc785\ub825\ub428';e.style.color='#a5d6a7';}else{e.textContent='\u26AA \ubbf8\uc785\ub825';e.style.color='rgba(255,255,255,.6)';}}
 function getActiveKey(){var m=getModel();return(m.startsWith('claude'))?getKeyAnt():getKey();}
 function updSt(v){var e=document.getElementById('apiSt');if(v&&v.length>10){e.textContent='\\uD83D\\uDFE2 입력됨';e.style.color='#a5d6a7';}else{e.textContent='\\u26AA 미입력';e.style.color='rgba(255,255,255,.6)';}}
 function saveModel(v){localStorage.setItem('easydsd_m',v);}
@@ -2187,7 +2187,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)
         ws_v.sheet_view.showGridLines=False
-        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.05)')
+        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.06)')
         tc.fill=PatternFill('solid',fgColor='4A148C'); tc.font=Font(color='FFFFFF',bold=True,size=12)
         tc.alignment=Alignment(horizontal='left',vertical='center')
         ws_v.merge_cells('A1:F1'); ws_v.row_dimensions[1].height=28
@@ -2350,7 +2350,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*54)
-    print('  easydsd v0.05 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.06 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.02 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.03 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -437,25 +437,27 @@ def group_note_tables(remaining,note_assignment,notes_per_sheet=5):
     return groups
 
 
-def _weave_paras(tbl_list, tbl_note_nums, all_paras, para_assign):
+def _weave_paras_by_position(tbl_list, all_paras,
+                              pre_gap=6000, post_gap=500):
     """
-    TABLE 리스트와 P단락을 XML 위치 순서대로 합쳐 반환.
-    tbl_note_nums: 이 그룹에 포함될 주석 번호들 (P 필터용)
-    all_paras: 전체 P단락 리스트
-    para_assign: {para_idx: note_num}
+    TABLE 리스트와 P단락을 순수 XML 위치 기준으로 합쳐 반환.
+
+    핵심 아이디어:
+    - 앵커/note_assign 기반 할당을 완전히 버림
+    - 이 그룹의 첫 TABLE 시작 - pre_gap  ~  마지막 TABLE 시작 + post_gap
+      범위 안에 있는 모든 P단락을 포함
+    - pre_gap이 충분히 크면 TABLE 앞의 긴 회계정책 텍스트도 포함됨
+    - TABLE과 P단락을 xml_start 순으로 정렬하여 반환
     """
-    # 이 그룹에 속하는 P단락 인덱스
-    if tbl_note_nums:
-        group_paras = [all_paras[pi] for pi, n in para_assign.items()
-                       if n in tbl_note_nums and pi < len(all_paras)]
-    else:
-        # note_classify OFF: TABLE 위치 범위 안의 P만 포함
-        if not tbl_list:
-            return tbl_list
-        min_pos = min(t['start'] for t in tbl_list)
-        max_pos = max(t['start'] for t in tbl_list)
-        group_paras = [p for p in all_paras
-                       if min_pos - 3000 <= p['xml_start'] <= max_pos + 3000]
+    if not tbl_list:
+        return []
+    tbl_positions = [t['start'] for t in tbl_list]
+    min_pos = min(tbl_positions)
+    max_pos = max(tbl_positions)
+    lo = min_pos - pre_gap
+    hi = max_pos + post_gap
+
+    group_paras = [p for p in all_paras if lo <= p['xml_start'] <= hi]
 
     items = []
     for tbl in tbl_list:
@@ -466,46 +468,54 @@ def _weave_paras(tbl_list, tbl_note_nums, all_paras, para_assign):
     return [it for _, it in items]
 
 
+def _weave_paras(tbl_list, tbl_note_nums, all_paras, para_assign):
+    """하위 호환 래퍼 — 내부적으로 위치 기반 weave 사용"""
+    return _weave_paras_by_position(tbl_list, all_paras)
+
+
 def group_note_tables_with_paras(remaining, note_assign, note_paras, para_assign,
                                   notes_per_sheet=5):
     """
-    TABLE + P단락을 주석 번호별로 그룹핑.
-    반환: [(sname, [item,...], True), ...]
+    TABLE을 XML 위치 순으로 청크 분할 후 P단락 포함.
+    시트명은 청크 내 주석 번호들로 결정.
+    - 노트 번호 기반 그룹핑 대신 XML 위치 순 정렬로 lo/hi 역전 문제 근본 해결
+    - 첫 그룹 lo=0 → 문서 앞 개요/회계정책 텍스트 전부 포함
     """
-    note_groups = {}; unassigned_t = []; unassigned_p = []
-    for tbl in remaining:
-        n = note_assign.get(tbl['idx'])
-        if n and isinstance(n, int) and n > 0:
-            note_groups.setdefault(n, {'tables': [], 'paras': []})['tables'].append(tbl)
-        else:
-            unassigned_t.append(tbl)
+    # 1. 모든 remaining TABLE을 XML 위치 순으로 정렬
+    sorted_tbls = sorted(remaining, key=lambda t: t['start'])
 
-    for pi, para in enumerate(note_paras):
-        n = para_assign.get(pi)
-        if n and isinstance(n, int) and n > 0 and n in note_groups:
-            note_groups[n]['paras'].append(para)
-        elif n not in note_groups:
-            unassigned_p.append(para)
+    # 2. notes_per_sheet개 TABLE씩 청크 분할
+    chunks = []
+    for i in range(0, len(sorted_tbls), notes_per_sheet):
+        chunks.append(sorted_tbls[i:i+notes_per_sheet])
 
-    sorted_notes = sorted(note_groups.keys())
     groups = []
-    for i in range(0, len(sorted_notes), notes_per_sheet):
-        chunk = sorted_notes[i:i+notes_per_sheet]
-        fn, ln = chunk[0], chunk[-1]
-        sname = (f'📝주석_{fn}' if fn == ln else f'📝주석_{fn}_{ln}')
-        # TABLE + P를 xml 위치 순서로 weave
-        tbl_note_set = set(chunk)
-        item_list = _weave_paras(
-            [t for n in chunk for t in note_groups[n]['tables']],
-            tbl_note_set, note_paras, para_assign
-        )
+    prev_hi = 0  # 첫 그룹 lo=0 → 문서 처음부터
+
+    for chunk_tbls in chunks:
+        if not chunk_tbls:
+            continue
+        tbl_max = max(t['start'] for t in chunk_tbls)
+        lo, hi = prev_hi, tbl_max + 2000
+
+        # 이 청크 내 주석 번호 수집 → 시트명 결정
+        note_nums = sorted({note_assign.get(t['idx'],0) for t in chunk_tbls} - {0})
+        if note_nums:
+            fn, ln = note_nums[0], note_nums[-1]
+            sname = (f'📝주석_{fn}' if fn==ln else f'📝주석_{fn}_{ln}')
+        else:
+            sname = f'📝주석_{len(groups)+1:02d}'
+
+        # P단락: lo~hi 구간
+        group_paras = [p for p in note_paras if lo <= p['xml_start'] <= hi]
+
+        items = [(t['start'], t) for t in chunk_tbls]
+        items += [(p['xml_start'], p) for p in group_paras]
+        items.sort(key=lambda x: x[0])
+        item_list = [it for _, it in items]
+        prev_hi = hi
         groups.append((sname[:31], item_list, True))
 
-    if unassigned_t:
-        for ci, start in enumerate(range(0, len(unassigned_t), 10), 1):
-            chunk_t = unassigned_t[start:start+10]
-            chunk_items = _weave_paras(chunk_t, set(), note_paras, para_assign)
-            groups.append((f'📝기타_{ci:02d}'[:31], chunk_items, True))
     return groups
 
 
@@ -1030,7 +1040,7 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     # 사용안내 (요약수치 시트 없음)
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.02)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.03)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -1084,7 +1094,7 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
                 remaining,note_assign,note_paras,para_assign,notes_per_sheet=5))
         else:
             for chunk_n,start in enumerate(range(0,len(remaining),10),1):
-                chunk=_weave_paras(remaining[start:start+10],[],note_paras,{})
+                chunk=_weave_paras_by_position(remaining[start:start+10],note_paras,pre_gap=3000)
                 groups.append((f'📝{chunk_n:02d}_주석',chunk,True))
     else:
         for chunk_n,start in enumerate(range(0,len(remaining),10),1):
@@ -1093,8 +1103,8 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
             if ai_mapping:
                 ai_names=[ai_mapping.get(t['idx']) for t in chunk if ai_mapping.get(t['idx'])]
                 sname=ai_names[0][:31] if ai_names else sname
-            # P태그 weave (note_classify OFF일 때도 P태그는 포함)
-            chunk=_weave_paras(chunk,[],note_paras,{})
+            # P태그 weave — 위치 기반 (note_classify OFF)
+            chunk=_weave_paras_by_position(chunk,note_paras,pre_gap=3000)
             groups.append((sname,chunk,True))
 
     def write_items_to_sheet(ws,item_list,show_titles=False):
@@ -1357,7 +1367,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.02</title>
+<title>easydsd v0.03</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -1530,7 +1540,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.02</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.03</p>
     </div>
     <div class="hd-right">
       <div class="hd-badge">v0.01</div>
@@ -1822,7 +1832,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       <div class="dev-pro">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>easydsd v0.02</h2>
+          <h2>easydsd v0.03</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + 전기금액 검증 + DSD 비교</div>
           <div class="dev-bg">
             <span class="badge bg0">v0.01</span>
@@ -1834,7 +1844,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">easydsd v0.02</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">easydsd v0.03</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -2154,7 +2164,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)
         ws_v.sheet_view.showGridLines=False
-        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.02)')
+        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.03)')
         tc.fill=PatternFill('solid',fgColor='4A148C'); tc.font=Font(color='FFFFFF',bold=True,size=12)
         tc.alignment=Alignment(horizontal='left',vertical='center')
         ws_v.merge_cells('A1:F1'); ws_v.row_dimensions[1].height=28
@@ -2317,7 +2327,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*54)
-    print('  easydsd v0.02 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.03 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)

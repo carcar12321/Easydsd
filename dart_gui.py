@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.01 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.02 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -42,7 +42,7 @@ def find_free_port(start=5000, end=5099):
 PORT       = find_free_port()
 EDIT_COLOR = 'FFF2CC'
 # 회계 서식: 양수=천단위 쉼표, 음수=괄호, 0='-' 표시
-FMT_ACCOUNT  = '_-* #,##0_-;-* (#,##0);_-* "-"_-;_-@_-'   # 정수 (원 단위)
+FMT_ACCOUNT  = '#,##0;(#,##0);"-"'                          # 양수=1,234  음수=(1,234)  0=-
 FMT_RATE     = '0.00%'                                        # 비율
 FMT_DECIMAL  = '#,##0.00'                                     # 소수
 SUM_COLOR  = 'E0F7FA'   # 합계/총계 행 색상
@@ -56,6 +56,7 @@ FIN_TABLE_MAP = [
 ]
 FIN_PREFIXES = ('🏦','💹','📈','💰')
 SUM_KEYWORDS = ['합계','총계','합 계','총 계']
+PARA_COLOR   = 'E8F5E9'   # 연초록 — 주석 P/TITLE 단락 텍스트 셀
 
 def fill(c): return PatternFill('solid', fgColor=c)
 def fnt(color='000000',bold=False,size=9,italic=False):
@@ -114,12 +115,58 @@ def parse_xml(xml):
                            rows=rows,start=tm.start()))
     return exts,tables
 
+
+def parse_paras(xml):
+    """
+    DSD XML에서 <P>/<TITLE> 단락 태그를 파싱.
+    반환: [{'xml_start', 'xml_end', 'text', 'item_type':'P'}, ...]
+    """
+    paras=[]
+    for m in re.finditer(r'<(?:P|TITLE)[^>]*>([^<]{5,800})</(?:P|TITLE)>',xml):
+        raw=m.group(1)
+        text=clean_title(raw)
+        if not text or is_blank_title(raw) or len(text)<=3: continue
+        paras.append({
+            'item_type': 'P',
+            'xml_start': m.start(),
+            'xml_end':   m.end(),
+            'text':      text,
+        })
+    return paras
+
+
+def assign_paras_to_notes(paras, anchors, tables):
+    """
+    P단락을 주석 번호에 할당 (XML 위치 기준).
+    반환: {para_idx: note_num}
+    """
+    if not anchors: return {}
+    table_pos={t['idx']:t['start'] for t in tables}
+    # 앵커: (xml_pos, note_num) 정렬
+    pts=sorted([(table_pos.get(ti,0),n) for n,title,ti in anchors])
+    result={}
+    for pi,para in enumerate(paras):
+        ppos=para['xml_start']; last_n=None
+        for apos,an in pts:
+            if apos<=ppos: last_n=an
+            else: break
+        if last_n: result[pi]=last_n
+    return result
+
 # ── 셀 헬퍼 ──────────────────────────────────────────────────────────────────
 def is_edit(cell):
     f=cell.fill
     if f and f.fill_type=='solid':
         fg=f.fgColor
         if fg and fg.type=='rgb': return fg.rgb.upper().endswith(EDIT_COLOR.upper())
+    return False
+
+def is_para(cell):
+    """P태그로 생성된 연초록 셀 판별"""
+    f=cell.fill
+    if f and f.fill_type=='solid':
+        fg=f.fgColor
+        if fg and fg.type=='rgb': return fg.rgb.upper().endswith(PARA_COLOR.upper())
     return False
 
 def cell_num(v):
@@ -222,13 +269,18 @@ def _rollover_sheet(ws, fill_000=True):
         # 예B) 기타비유동:  col3=금액(당기) / col5='-'(전기자리)
         #       → '-'이 amt_cells 최솟값(col3)보다 오른쪽 → 단일셀 처리 진행
         if len(amt_cells) >= 1:
-            min_amt_col = amt_cells[0][0]  # amt_cells 이미 정렬 전이므로 min 사용
+            min_amt_col = amt_cells[0][0]
             for ci in range(1, ws.max_column+1):
                 cell_d = ws.cell(rowi, ci)
                 if is_edit(cell_d) and str(cell_d.value or '').strip() == '-':
-                    if ci < min_amt_col:   # '-'이 금액보다 왼쪽 → 당기없음 행
-                        amt_cells = []     # 롤오버 대상 제거
-                    break                  # '-' 하나만 확인하면 충분
+                    if ci < min_amt_col:
+                        # '-' 이 금액보다 왼쪽 = 당기=0('-'), 전기=금액
+                        # 롤오버: 전기 자리에 '-'(0) 이월, 당기('-') → '000'
+                        _pc, p_cell = amt_cells[-1]   # 전기 위치 (마지막 금액 셀)
+                        p_cell.value = '-'             # 전기에 당기값(0='-') 이월
+                        cell_d.value  = '000'          # 당기 자리 = 000
+                        amt_cells = []                 # 추가 처리 방지
+                    break
 
         # 금액 셀 수에 따라 분기 처리
         if len(amt_cells) == 0:
@@ -385,6 +437,79 @@ def group_note_tables(remaining,note_assignment,notes_per_sheet=5):
     return groups
 
 
+def _weave_paras(tbl_list, tbl_note_nums, all_paras, para_assign):
+    """
+    TABLE 리스트와 P단락을 XML 위치 순서대로 합쳐 반환.
+    tbl_note_nums: 이 그룹에 포함될 주석 번호들 (P 필터용)
+    all_paras: 전체 P단락 리스트
+    para_assign: {para_idx: note_num}
+    """
+    # 이 그룹에 속하는 P단락 인덱스
+    if tbl_note_nums:
+        group_paras = [all_paras[pi] for pi, n in para_assign.items()
+                       if n in tbl_note_nums and pi < len(all_paras)]
+    else:
+        # note_classify OFF: TABLE 위치 범위 안의 P만 포함
+        if not tbl_list:
+            return tbl_list
+        min_pos = min(t['start'] for t in tbl_list)
+        max_pos = max(t['start'] for t in tbl_list)
+        group_paras = [p for p in all_paras
+                       if min_pos - 3000 <= p['xml_start'] <= max_pos + 3000]
+
+    items = []
+    for tbl in tbl_list:
+        items.append((tbl['start'], tbl))
+    for para in group_paras:
+        items.append((para['xml_start'], para))
+    items.sort(key=lambda x: x[0])
+    return [it for _, it in items]
+
+
+def group_note_tables_with_paras(remaining, note_assign, note_paras, para_assign,
+                                  notes_per_sheet=5):
+    """
+    TABLE + P단락을 주석 번호별로 그룹핑.
+    반환: [(sname, [item,...], True), ...]
+    """
+    note_groups = {}; unassigned_t = []; unassigned_p = []
+    for tbl in remaining:
+        n = note_assign.get(tbl['idx'])
+        if n and isinstance(n, int) and n > 0:
+            note_groups.setdefault(n, {'tables': [], 'paras': []})['tables'].append(tbl)
+        else:
+            unassigned_t.append(tbl)
+
+    for pi, para in enumerate(note_paras):
+        n = para_assign.get(pi)
+        if n and isinstance(n, int) and n > 0 and n in note_groups:
+            note_groups[n]['paras'].append(para)
+        elif n not in note_groups:
+            unassigned_p.append(para)
+
+    sorted_notes = sorted(note_groups.keys())
+    groups = []
+    for i in range(0, len(sorted_notes), notes_per_sheet):
+        chunk = sorted_notes[i:i+notes_per_sheet]
+        fn, ln = chunk[0], chunk[-1]
+        sname = (f'📝주석_{fn}' if fn == ln else f'📝주석_{fn}_{ln}')
+        # TABLE + P를 xml 위치 순서로 weave
+        tbl_note_set = set(chunk)
+        item_list = _weave_paras(
+            [t for n in chunk for t in note_groups[n]['tables']],
+            tbl_note_set, note_paras, para_assign
+        )
+        groups.append((sname[:31], item_list, True))
+
+    if unassigned_t:
+        for ci, start in enumerate(range(0, len(unassigned_t), 10), 1):
+            chunk_t = unassigned_t[start:start+10]
+            chunk_items = _weave_paras(chunk_t, set(), note_paras, para_assign)
+            groups.append((f'📝기타_{ci:02d}'[:31], chunk_items, True))
+    return groups
+
+
+
 def apply_period_change(wb,cur_period,cur_year,start_m,start_d,end_m,end_d):
     """\uC7AC\uBB34\uC81C\uD45C \uD5E4\uB354 \uAE30\uC218/\uC5F0\uB3C4 \uC77C\uAD04 \uCE58\uD658"""
     prev_period=cur_period-1; prev_year=cur_year-1
@@ -411,11 +536,12 @@ def apply_period_change(wb,cur_period,cur_year,start_m,start_d,end_m,end_d):
     for sname in wb.sheetnames:
         if not any(sname.startswith(p) for p in FIN_PREFIXES): continue
         ws=wb[sname]
-        for row in ws.iter_rows(max_row=8,values_only=True):
+        # '년' 접미사 필수 → 날짜(2025.01.01) 등 오탐 방지
+        for row in ws.iter_rows(max_row=15,values_only=True):
             for v in row:
                 if v and isinstance(v,str):
-                    year_in_hdr+=[int(x) for x in re.findall(r'\b(20\d{2})\b',v)]
-        if year_in_hdr: break
+                    year_in_hdr+=[int(x) for x in re.findall(r'(20\d{2})년',v)]
+        if len(set(year_in_hdr))>=2: break  # 당기+전기 두 연도 확보
     year_in_hdr=sorted(set(year_in_hdr))
     if len(year_in_hdr)>=2: old_prev_y,old_cur_y=year_in_hdr[0],year_in_hdr[1]
     elif len(year_in_hdr)==1: old_cur_y=year_in_hdr[0]; old_prev_y=old_cur_y-1
@@ -898,12 +1024,13 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     xml      =files.get('contents.xml',b'').decode('utf-8',errors='replace')
     meta_xml =files.get('meta.xml',b'').decode('utf-8',errors='replace')
     _exts,tables=parse_xml(xml)
+    paras=parse_paras(xml)   # P/TITLE 단락 태그
     wb=openpyxl.Workbook()
 
     # 사용안내 (요약수치 시트 없음)
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.01)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.02)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -942,17 +1069,23 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
             fin_tbls.append(tables[i]); i+=1
         groups.append((fin_label[:31],fin_tbls,False))
     remaining=tables[i:]
+    # 주석 구간 P태그: 첫 번째 note TABLE 위치 이후의 P단락
+    note_sec_start=remaining[0]['start']-5000 if remaining else 0
+    note_paras=[p for p in paras if p['xml_start']>=note_sec_start]
     if do_note_classify and remaining:
         anchors=extract_note_anchors(remaining)
         if rollover_api_key and anchors:
             note_assign=classify_notes_ai(rollover_api_key,remaining,anchors,rollover_model)
         else:
             note_assign=classify_notes_machine(remaining)
+        para_assign=assign_paras_to_notes(note_paras,anchors,remaining) if anchors else {}
         if note_assign:
-            groups.extend(group_note_tables(remaining,note_assign,notes_per_sheet=5))
+            groups.extend(group_note_tables_with_paras(
+                remaining,note_assign,note_paras,para_assign,notes_per_sheet=5))
         else:
             for chunk_n,start in enumerate(range(0,len(remaining),10),1):
-                groups.append((f'📝{chunk_n:02d}_주석',remaining[start:start+10],True))
+                chunk=_weave_paras(remaining[start:start+10],[],note_paras,{})
+                groups.append((f'📝{chunk_n:02d}_주석',chunk,True))
     else:
         for chunk_n,start in enumerate(range(0,len(remaining),10),1):
             chunk=remaining[start:start+10]
@@ -960,15 +1093,36 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
             if ai_mapping:
                 ai_names=[ai_mapping.get(t['idx']) for t in chunk if ai_mapping.get(t['idx'])]
                 sname=ai_names[0][:31] if ai_names else sname
+            # P태그 weave (note_classify OFF일 때도 P태그는 포함)
+            chunk=_weave_paras(chunk,[],note_paras,{})
             groups.append((sname,chunk,True))
 
-    def write_tables_to_sheet(ws,tbl_list,show_titles=False):
-        er=1; max_cols_all=1; table_start_rows={}
-        for tbl in tbl_list:
+    def write_items_to_sheet(ws,item_list,show_titles=False):
+        """TABLE 아이템 + P단락 아이템을 시트에 출력. 두 딕트 반환."""
+        er=1; max_cols_all=1; table_start_rows={}; para_start_rows={}
+        for item in item_list:
+            if item.get('item_type')=='P': continue
+            tbl=item
             if not tbl['rows']: continue
             max_cols_all=max(max_cols_all,
                 min(max((sum(c['colspan'] for c in row) for row in tbl['rows']),default=1),26))
-        for tbl in tbl_list:
+        for item in item_list:
+            # ── P 단락 셀 ──────────────────────────────────────────────
+            if item.get('item_type')=='P':
+                wc=ws.cell(er,1,item['text'])
+                wc.fill=PatternFill('solid',fgColor=PARA_COLOR)
+                wc.font=Font(size=9,color='1B5E20')
+                wc.alignment=Alignment(horizontal='left',vertical='center',wrap_text=True)
+                if max_cols_all>1:
+                    try: ws.merge_cells(start_row=er,start_column=1,end_row=er,end_column=min(max_cols_all,26))
+                    except: pass
+                n_lines=max(1,len(item['text'])//80+1)
+                ws.row_dimensions[er].height=max(18,16*n_lines)
+                para_start_rows[item['xml_start']]=er
+                er+=1
+                continue
+            # ── TABLE 아이템 ───────────────────────────────────────────
+            tbl=item
             if show_titles and tbl.get('ctx_title'):
                 div=ws.cell(er,1,tbl['ctx_title'])
                 div.fill=PatternFill('solid',fgColor='D9D9D9')
@@ -984,21 +1138,18 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
                 for cell in row:
                     if col>26: break
                     v,tag=cell['value'],cell['tag']
-                    # 헤더(TH/TE)는 그대로, 데이터 셀은 숫자 타입으로 변환
-                    # → =SUM() 수식이 실제로 합산되게 함
-                    cell_val = _to_cell_value(v) if tag not in ('TH','TE') else v
+                    cell_val=_to_cell_value(v) if tag not in ('TH','TE') else v
                     wc=ws.cell(er,col,cell_val)
                     if tag in ('TH','TE'):
                         wc.fill=fill(C['navy']); wc.font=fnt(C['white'],bold=True,size=9)
                         wc.alignment=aln('center',wrap=True)
                     else:
                         wc.fill=fill(C['yellow']); wc.font=fnt(size=9)
-                        if isinstance(cell_val, (int, float)):
-                            # 숫자 타입 → 회계 서식 적용 (음수 괄호, 0은 '-')
-                            if isinstance(cell_val, float) and cell_val != int(cell_val):
-                                wc.number_format = FMT_DECIMAL   # 소수(비율 등)
+                        if isinstance(cell_val,(int,float)):
+                            if isinstance(cell_val,float) and cell_val!=int(cell_val):
+                                wc.number_format=FMT_DECIMAL
                             else:
-                                wc.number_format = FMT_ACCOUNT   # 정수(원 단위)
+                                wc.number_format=FMT_ACCOUNT
                             wc.alignment=aln('right',wrap=True)
                         else:
                             wc.alignment=aln('right' if is_num_or_decimal(v) else 'left',wrap=True)
@@ -1014,31 +1165,41 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
                 er+=1
         ws.column_dimensions['A'].width=28
         for ci in range(2,max_cols_all+1): ws.column_dimensions[get_column_letter(ci)].width=18
-        return table_start_rows
+        return table_start_rows, para_start_rows
 
     sheet_map=[]; used=set()
     for gitem in groups:
-        sraw=gitem[0]; tbl_list=gitem[1]; show_t=gitem[2] if len(gitem)>2 else False
+        sraw=gitem[0]; item_list=gitem[1]; show_t=gitem[2] if len(gitem)>2 else False
         sname=sraw[:31]
         if sname in used: sname=(sraw[:28]+f'_{len(used)}')[:31]
         used.add(sname)
         ws=wb.create_sheet(sname); ws.sheet_view.showGridLines=False
-        tsr=write_tables_to_sheet(ws,tbl_list,show_t)
-        for tbl in tbl_list:
-            sheet_map.append((sname,tbl['idx'],tsr.get(tbl['idx'],-1)))
+        tsr,psr=write_items_to_sheet(ws,item_list,show_t)
+        for item in item_list:
+            if item.get('item_type')=='P':
+                xstart=item['xml_start']; xend=item['xml_end']
+                erow=psr.get(xstart,-1)
+                sheet_map.append((sname,'P',xstart,xend,erow))
+            else:
+                sheet_map.append((sname,'TABLE',item['idx'],-1,tsr.get(item['idx'],-1)))
 
     # _원본XML
     ws_r=wb.create_sheet('_원본XML'); ws_r.sheet_view.showGridLines=False
     ws_r.cell(1,1,'이 시트는 DSD 복원에 필수입니다. 절대 수정/삭제 금지!').font=fnt(C['orange'],bold=True,size=9)
     ws_r.cell(2,1,'meta_xml'); ws_r.cell(2,2,meta_xml or '')
-    for hi,(h,w) in enumerate([('sheet_name',35),('table_idx',12),('fin_label',22),('ctx_title',40),('excel_start_row',14)],1):
+    HDRS=[('sheet_name',35),('idx_or_xmlstart',14),('fin_or_xmlend',22),('title_or_text',40),('excel_start_row',14),('type',8)]
+    for hi,(h,w) in enumerate(HDRS,1):
         ws_r.cell(4,hi,h); ws_r.column_dimensions[get_column_letter(hi)].width=w
-    for ri,(sname,t_idx,excel_row) in enumerate(sheet_map,5):
-        t=tables[t_idx]; ws_r.cell(ri,1,sname); ws_r.cell(ri,2,t_idx)
-        ws_r.cell(ri,3,t['fin_label']); ws_r.cell(ri,4,t['ctx_title']); ws_r.cell(ri,5,excel_row)
+    for ri,(sname,rec_type,b_val,c_val,excel_row) in enumerate(sheet_map,5):
+        ws_r.cell(ri,1,sname); ws_r.cell(ri,2,b_val); ws_r.cell(ri,5,excel_row)
+        ws_r.cell(ri,6,rec_type)
+        if rec_type=='TABLE':
+            t=tables[b_val]; ws_r.cell(ri,3,t['fin_label']); ws_r.cell(ri,4,t['ctx_title'])
+        else:  # P
+            ws_r.cell(ri,3,c_val)  # xml_end
 
-    # 합계/총계 SUM 수식 자동화
-    apply_sum_formulas(wb)
+    # 합계/총계 SUM 수식 자동화 — 범위 오탐 문제로 비활성화
+    # apply_sum_formulas(wb)
 
     # 롤오버
     if do_rollover:
@@ -1073,24 +1234,38 @@ def excel_to_dsd_bytes(orig_dsd_bytes,xlsx_bytes):
         orig_files={n:zf.read(n) for n in zf.namelist()}
     contents_xml=orig_files['contents.xml'].decode('utf-8',errors='replace')
     wb=openpyxl.load_workbook(io.BytesIO(xlsx_bytes),data_only=True)
-    mapping={}
+    mapping={}; p_records={}  # TABLE 매핑 + P태그 위치
     if '_원본XML' in wb.sheetnames:
         ws_r=wb['_원본XML']
         for row in ws_r.iter_rows(min_row=5,values_only=True):
             if not row or row[0] is None or row[1] is None: continue
-            sname=str(row[0]).strip(); t_idx=int(row[1])
-            esr=int(row[4]) if len(row)>4 and row[4] is not None else -1
-            if sname: mapping.setdefault(sname,[]).append((t_idx,esr))
+            sname=str(row[0]).strip()
+            rec_type=str(row[5]).strip() if len(row)>5 and row[5] else 'TABLE'
+            if rec_type=='P':
+                try:
+                    xs=int(row[1]); xe=int(row[2]) if row[2] else 0
+                    er=int(row[4]) if row[4] is not None else -1
+                    if sname and xs>0: p_records.setdefault(sname,[]).append((xs,xe,er))
+                except (ValueError,TypeError): pass
+            else:
+                try:
+                    t_idx=int(row[1])
+                    esr=int(row[4]) if len(row)>4 and row[4] is not None else -1
+                    if sname: mapping.setdefault(sname,[]).append((t_idx,esr))
+                except (ValueError,TypeError): pass
     exts={}; t_changes={}
     for sname in wb.sheetnames:
         if sname in ('📋사용안내','_원본XML','_meta'): continue
         ws=wb[sname]
-        changes=[]
+        changes=[]; p_changes=[]
         for ri,row in enumerate(ws.iter_rows(min_row=2)):
             for ci,cell in enumerate(row):
                 if is_edit(cell) and cell.value is not None:
                     changes.append((ri,ci,str(cell.value)))
+                elif is_para(cell) and cell.value is not None:
+                    p_changes.append((ri,ci,str(cell.value)))
         if changes: t_changes[sname]=changes
+        if p_changes: t_changes.setdefault(sname+'__P__',[]).extend(p_changes)
     for ext_code,val in exts.items():
         contents_xml=re.sub(
             rf'(<EXTRACTION[^>]*ACODE="{re.escape(ext_code)}"[^>]*>)[^<]+(</EXTRACTION>)',
@@ -1136,6 +1311,23 @@ def excel_to_dsd_bytes(orig_dsd_bytes,xlsx_bytes):
                 last=tr_m.end(); td_row+=1
             rebuilt.append(tt[last:])
             patches.append((ts,te,''.join(rebuilt)))
+    # P태그 역변환 패치
+    for sname,precs in p_records.items():
+        pkey=sname+'__P__'
+        pch=t_changes.get(pkey,[])
+        if not pch: continue
+        # {excel_row: new_text}
+        row_text={ri+2:v for ri,ci,v in pch if ci==0}  # A열(ci=0), ri는 min_row=2 기준
+        for xml_start,xml_end,excel_row in precs:
+            new_text=row_text.get(excel_row)
+            if not new_text: continue
+            orig_tag=contents_xml[xml_start:xml_end]
+            encoded=(new_text
+                .replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+                .replace('"','&quot;').replace('\n','&amp;cr;'))
+            m_tag=re.match(r'(<(?:P|TITLE)[^>]*>)(.*)(</(?:P|TITLE)>)',orig_tag,re.DOTALL)
+            if m_tag:
+                patches.append((xml_start,xml_end,m_tag.group(1)+encoded+m_tag.group(3)))
     result=contents_xml
     for ts,te,nt in sorted(patches,key=lambda x:-x[0]):
         result=result[:ts]+nt+result[te:]
@@ -1165,7 +1357,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.01</title>
+<title>easydsd v0.02</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -1338,7 +1530,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.01</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.02</p>
     </div>
     <div class="hd-right">
       <div class="hd-badge">v0.01</div>
@@ -1630,7 +1822,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       <div class="dev-pro">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>easydsd v0.01</h2>
+          <h2>easydsd v0.02</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + 전기금액 검증 + DSD 비교</div>
           <div class="dev-bg">
             <span class="badge bg0">v0.01</span>
@@ -1642,7 +1834,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">easydsd v0.01</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">easydsd v0.02</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -1962,7 +2154,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)
         ws_v.sheet_view.showGridLines=False
-        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.01)')
+        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.02)')
         tc.fill=PatternFill('solid',fgColor='4A148C'); tc.font=Font(color='FFFFFF',bold=True,size=12)
         tc.alignment=Alignment(horizontal='left',vertical='center')
         ws_v.merge_cells('A1:F1'); ws_v.row_dimensions[1].height=28
@@ -2125,7 +2317,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*54)
-    print('  easydsd v0.01 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.02 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)

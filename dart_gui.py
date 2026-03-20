@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.94 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.96 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -293,6 +293,154 @@ def apply_rollover_smart(wb, api_key='', model_name='gemini-3-flash-preview'):
 
 
 
+# ── 주석 번호 앵커 추출 / 기계 분류 / AI 분류 / 그룹핑 / 기수 변경 ──────────
+
+def extract_note_anchors(tables):
+    """ctx_title에서 주석 대번호 앵커 탐지 → [(note_num,title,table_idx),...]"""
+    PATS = [
+        (r'^주석\s*(\d{1,2})\s*[.\-·]\s*(.{2,20})', 'prefix'),
+        (r'^(\d{1,2})\s*\.\s*([^\d\(].{1,20})',                 'dot'),
+        (r'^\((\d{1,2})\)\s*([^\d].{1,20})',                    'paren'),
+        (r'^제\s*(\d{1,2})\s*[조절항]\s*(.{2,20})', 'clause'),
+    ]
+    anchors=[]; seen=set()
+    for tbl in tables:
+        ctx=tbl.get('ctx_title','').strip()
+        if not ctx: continue
+        for pat,_ in PATS:
+            m=re.match(pat,ctx)
+            if m:
+                n=int(m.group(1)); title=m.group(2).split('&')[0].strip()[:15]
+                if n not in seen and 1<=n<=99:
+                    anchors.append((n,title,tbl['idx'])); seen.add(n)
+                break
+    return sorted(anchors,key=lambda x:x[2])
+
+
+def classify_notes_machine(tables):
+    """{table_idx: note_num} — 직전 앵커 기준 할당"""
+    anchors=extract_note_anchors(tables)
+    if not anchors: return {}
+    points=sorted([(ti,n) for n,title,ti in anchors])
+    result={}
+    for tbl in tables:
+        ti=tbl['idx']; last=None
+        for ati,an in points:
+            if ati<=ti: last=an
+            else: break
+        if last: result[ti]=last
+    return result
+
+
+def classify_notes_ai(api_key,tables,anchors,model_name='gemini-3-flash-preview'):
+    """{table_idx: note_num} — 앵커 힌트+Gemini 추론"""
+    if not api_key or not anchors: return {}
+    try:
+        genai.configure(api_key=api_key)
+        mdl=genai.GenerativeModel(model_name)
+        hint=chr(10).join(f'  TABLE[{ti}] -> 주석 {n}. {title}' for n,title,ti in anchors[:12])
+        note_tbls=[t for t in tables if not t['fin_label']]
+        tlist=chr(10).join(f'TABLE[{t["idx"]}] ctx={t["ctx_title"][:30]!r}' for t in note_tbls[:80])
+        prompt=(
+            '한국 DART 감사보고서 주석 TABLE 분류.'+chr(10)+chr(10)
+            +'[이 파일의 주석 번호 패턴 힌트]'+chr(10)
+            +hint+chr(10)+chr(10)
+            +'[분류할 TABLE 목록]'+chr(10)+tlist+chr(10)+chr(10)
+            +'각 TABLE이 몇 번 주석에 속하는지 분류해줘.'
+            +'서문/목차/감사보고서 등 주석 번호 없는 것은 note=0.'+chr(10)+chr(10)
+            +'JSON만 응답: {"assignment":[{"idx":30,"note":5}]}'
+        )
+        resp=mdl.generate_content(prompt,request_options={'timeout':90})
+        m=re.search(r'\{.*\}',resp.text.strip(),re.DOTALL)
+        if not m: return {}
+        data=json.loads(m.group(0))
+        result={item['idx']:item['note'] for item in data.get('assignment',[]) if item.get('note',0)>0}
+        print(f'[Note AI] {len(result)}\uAC1C TABLE \uBD84\uB958')
+        return result
+    except Exception as e:
+        print(f'[Note AI error] {e}'); return {}
+
+
+def group_note_tables(remaining,note_assignment,notes_per_sheet=5):
+    """{table_idx:note_num}으로 주석 시트 그룹핑 → [(sname,[tbl...],True),...]"""
+    note_groups={}; unassigned=[]
+    for tbl in remaining:
+        n=note_assignment.get(tbl['idx'])
+        if n: note_groups.setdefault(n,[]).append(tbl)
+        else: unassigned.append(tbl)
+    sorted_notes=sorted(note_groups.keys())
+    groups=[]
+    for i in range(0,len(sorted_notes),notes_per_sheet):
+        chunk=sorted_notes[i:i+notes_per_sheet]
+        tbls=[]
+        for n in chunk: tbls.extend(note_groups[n])
+        fn,ln=chunk[0],chunk[-1]
+        sname=(f'📝주석_{fn}' if fn==ln else f'📝주석_{fn}_{ln}')
+        groups.append((sname[:31],tbls,True))
+    if unassigned:
+        for ci,st in enumerate(range(0,len(unassigned),10),1):
+            groups.append((f'📝기타_{ci:02d}'[:31],unassigned[st:st+10],True))
+    return groups
+
+
+def apply_period_change(wb,cur_period,cur_year,start_m,start_d,end_m,end_d):
+    """\uC7AC\uBB34\uC81C\uD45C \uD5E4\uB354 \uAE30\uC218/\uC5F0\uB3C4 \uC77C\uAD04 \uCE58\uD658"""
+    prev_period=cur_period-1; prev_year=cur_year-1
+    SKIP={'📋\uC0AC\uC6A9\uC548\uB0B4','_\uC6D0\uBCF8XML'}
+
+    # 기존 기수 탐지
+    old_cur_p=old_prev_p=None
+    for sname in wb.sheetnames:
+        if not any(sname.startswith(p) for p in FIN_PREFIXES): continue
+        ws=wb[sname]
+        for row in ws.iter_rows(max_row=10,values_only=True):
+            for v in row:
+                if not v or not isinstance(v,str): continue
+                m=re.search(r'제\s*(\d{1,3})\s*\(당\)',v)
+                if m and not old_cur_p: old_cur_p=int(m.group(1))
+                m=re.search(r'제\s*(\d{1,3})\s*\(전\)',v)
+                if m and not old_prev_p: old_prev_p=int(m.group(1))
+        if old_cur_p: break
+    if not old_cur_p:  old_cur_p=cur_period-1
+    if not old_prev_p: old_prev_p=cur_period-2
+
+    # 기존 연도 탐지
+    year_in_hdr=[]
+    for sname in wb.sheetnames:
+        if not any(sname.startswith(p) for p in FIN_PREFIXES): continue
+        ws=wb[sname]
+        for row in ws.iter_rows(max_row=8,values_only=True):
+            for v in row:
+                if v and isinstance(v,str):
+                    year_in_hdr+=[int(x) for x in re.findall(r'\b(20\d{2})\b',v)]
+        if year_in_hdr: break
+    year_in_hdr=sorted(set(year_in_hdr))
+    if len(year_in_hdr)>=2: old_prev_y,old_cur_y=year_in_hdr[0],year_in_hdr[1]
+    elif len(year_in_hdr)==1: old_cur_y=year_in_hdr[0]; old_prev_y=old_cur_y-1
+    else: old_cur_y=cur_year-1; old_prev_y=cur_year-2
+
+    def rep(t):
+        if not t or not isinstance(t,str): return t
+        t=re.sub(rf'제\s*{old_cur_p}\s*\(당\)', f'제 {cur_period}(당)', t)
+        t=re.sub(rf'제\s*{old_prev_p}\s*\(전\)', f'제 {prev_period}(전)', t)
+        t=re.sub(rf'제\s*{old_cur_p}\s*기\b',     f'제 {cur_period}기',   t)
+        t=re.sub(rf'제\s*{old_prev_p}\s*기\b',    f'제 {prev_period}기',  t)
+        t=t.replace(f'{old_cur_y}년',  f'{cur_year}년')
+        t=t.replace(f'{old_prev_y}년', f'{prev_year}년')
+        return t
+
+    for sname in wb.sheetnames:
+        if sname in SKIP: continue
+        ws=wb[sname]
+        for rowi in range(1,ws.max_row+1):
+            for ci in range(1,ws.max_column+1):
+                cell=ws.cell(rowi,ci)
+                if cell.value and isinstance(cell.value,str):
+                    nv=rep(cell.value)
+                    if nv!=cell.value: cell.value=nv
+
+
+
 # ── 기능2: 합계/총계 행 SUM 수식 자동화 ─────────────────────────────────────
 def apply_sum_formulas(wb):
     """
@@ -383,10 +531,12 @@ def python_verify(xlsx_bytes:bytes)->dict:
         ws=wb[sname]
         for row in ws.iter_rows(max_row=200,values_only=True):
             for v in row:
-                if v is None: continue
-                for m in re.finditer(r'(?:주\s*|주석\s*)?(\d{1,2})(?:\s*,\s*(\d{1,2}))*',str(v)):
+                if v is None or not isinstance(v,str): continue
+                # 주석 참조 패턴만 탐지: '주석 5', '주석5,6', '(주 5)' 등
+                # 단순 숫자(금액 등)는 제외
+                for m in re.finditer(r'주\s*석?\s*(\d{1,2})(?:\s*[,·]\s*(\d{1,2}))*',str(v)):
                     nums=[int(x) for x in re.findall(r'\d{1,2}',m.group(0))]
-                    fin_note_refs.update(n for n in nums if 1<=n<=99)
+                    fin_note_refs.update(n for n in nums if 1<=n<=50)
     existing_notes=set()
     for sname in wb.sheetnames:
         m=re.search(r'(\d{1,2})',sname)
@@ -399,7 +549,8 @@ def python_verify(xlsx_bytes:bytes)->dict:
         else:
             info.append(f'[주석 매핑] 참조 주석 {len(fin_note_refs)}개 모두 시트 존재')
 
-    return {'errors':errors,'warnings':warnings,'info':info}
+    note_map={'refs':sorted(fin_note_refs),'existing':sorted(existing_notes),'missing':sorted({n for n in fin_note_refs if n not in existing_notes and n>5})}
+    return {'errors':errors,'warnings':warnings,'info':info,'note_map':note_map}
 
 
 # ── Gemini: AI 시트명 분류 ────────────────────────────────────────────────────
@@ -429,7 +580,7 @@ def gemini_classify_tables(api_key,tables,model_name='gemini-3-flash-preview'):
 
 
 # ── Gemini: 강화 AI 교차 검증 ─────────────────────────────────────────────────
-def gemini_verify_enhanced(api_key,fin_data,note_data,py_result,model_name='gemini-3-flash-preview'):
+def gemini_verify_enhanced(api_key,fin_data,note_data,py_result,model_name='gemini-3-flash-preview',note_map_result=None):
     if not api_key: return 'Gemini API Key가 없습니다.'
     try:
         genai.configure(api_key=api_key)
@@ -441,6 +592,15 @@ def gemini_verify_enhanced(api_key,fin_data,note_data,py_result,model_name='gemi
             +[f'[경고] {w}' for w in py_result.get('warnings',[])]
             +[f'[정보] {i}' for i in py_result.get('info',[])]
         ) or '파이썬 자동검사 이상 없음'
+        note_map_text=''
+        if note_map_result and note_map_result.get('missing'):
+            note_map_text=(
+                chr(10)+'[주석 번호 매핑 검증]'+chr(10)
+                +f'본문 참조 주석번호: {note_map_result["refs"]}'+chr(10)
+                +f'실제 시트 주석번호: {note_map_result["existing"]}'+chr(10)
+                +f'누락 의심 번호: {note_map_result["missing"]}'+chr(10)
+                +'(누락 번호가 실제 오류인지, 다른 주석에 통합되어 있는지 확인해줘.)'+chr(10)
+            )
         INST=(
             '[지시사항] 너는 공인회계사(CPA)가 아니야. '
             '복잡한 회계 기준, 적정성 여부, 감사 의견에 대한 훈수나 평가는 절대 하지 마. '
@@ -451,6 +611,7 @@ def gemini_verify_enhanced(api_key,fin_data,note_data,py_result,model_name='gemi
         prompt=(
             INST+chr(10)+chr(10)
             +f'[파이썬 1차 수학 검사 결과]{chr(10)}{py_err_text}'+chr(10)+chr(10)
+            +note_map_text
             +f'[재무제표 본문]{chr(10)}{fin_text}'+chr(10)+chr(10)
             +f'[주석 데이터]{chr(10)}{note_text}'+chr(10)+chr(10)
             +'파이썬 오류와 재무제표 맥락을 합쳐서 최종 교차검증 리포트를 작성해줘.'+chr(10)+chr(10)
@@ -461,7 +622,10 @@ def gemini_verify_enhanced(api_key,fin_data,note_data,py_result,model_name='gemi
             +'## ⚠️ 확인 불가 항목'+chr(10)+'(데이터 부족)'+chr(10)+chr(10)
             +'## 📋 종합'+chr(10)+'(2~3줄 요약, 회계 의견 금지)'
         )
-        resp=model.generate_content(prompt)
+        resp=model.generate_content(
+            prompt,
+            request_options={'timeout': 120}  # 120초 타임아웃
+        )
         return resp.text.strip()
     except Exception as e:
         return f'Gemini API 오류: {e}'
@@ -724,7 +888,9 @@ def extract_fin_and_notes(xlsx_bytes):
 
 # ── DSD -> Excel 변환 (요약수치 제거, SUM 자동화 추가) ────────────────────────
 def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
-                       rollover_api_key='',rollover_model='gemini-3-flash-preview'):
+                       rollover_api_key='',rollover_model='gemini-3-flash-preview',
+                       do_note_classify=False,
+                       do_period_change=False,period_params=None):
     with zipfile.ZipFile(io.BytesIO(dsd_bytes)) as zf:
         files={n:zf.read(n) for n in zf.namelist()}
     xml      =files.get('contents.xml',b'').decode('utf-8',errors='replace')
@@ -735,7 +901,7 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     # 사용안내 (요약수치 시트 없음)
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.94)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.96)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -774,14 +940,25 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
             fin_tbls.append(tables[i]); i+=1
         groups.append((fin_label[:31],fin_tbls,False))
     remaining=tables[i:]
-    for chunk_n,start in enumerate(range(0,len(remaining),10),1):
-        chunk=remaining[start:start+10]
-        if ai_mapping:
-            ai_names=[ai_mapping.get(t['idx']) for t in chunk if ai_mapping.get(t['idx'])]
-            sname=ai_names[0][:31] if ai_names else f'📝{chunk_n:02d}_주석'
+    if do_note_classify and remaining:
+        anchors=extract_note_anchors(remaining)
+        if rollover_api_key and anchors:
+            note_assign=classify_notes_ai(rollover_api_key,remaining,anchors,rollover_model)
         else:
+            note_assign=classify_notes_machine(remaining)
+        if note_assign:
+            groups.extend(group_note_tables(remaining,note_assign,notes_per_sheet=5))
+        else:
+            for chunk_n,start in enumerate(range(0,len(remaining),10),1):
+                groups.append((f'📝{chunk_n:02d}_주석',remaining[start:start+10],True))
+    else:
+        for chunk_n,start in enumerate(range(0,len(remaining),10),1):
+            chunk=remaining[start:start+10]
             sname=f'📝{chunk_n:02d}_주석'
-        groups.append((sname,chunk,True))
+            if ai_mapping:
+                ai_names=[ai_mapping.get(t['idx']) for t in chunk if ai_mapping.get(t['idx'])]
+                sname=ai_names[0][:31] if ai_names else sname
+            groups.append((sname,chunk,True))
 
     def write_tables_to_sheet(ws,tbl_list,show_titles=False):
         er=1; max_cols_all=1; table_start_rows={}
@@ -861,11 +1038,14 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     # 합계/총계 SUM 수식 자동화
     apply_sum_formulas(wb)
 
-    # 롤오버 (FIN 무조건 + 주석 AI 판별)
+    # 롤오버
     if do_rollover:
-        apply_rollover_smart(wb,
-                             api_key=rollover_api_key,
-                             model_name=rollover_model)
+        apply_rollover_smart(wb,api_key=rollover_api_key,model_name=rollover_model)
+
+    # 기수/연도 자동 변경
+    if do_period_change and period_params:
+        try: apply_period_change(wb,**period_params)
+        except Exception as pe: print(f'[period_change error] {pe}')
 
     buf=io.BytesIO(); wb.save(buf); return buf.getvalue()
 
@@ -973,7 +1153,7 @@ def _watchdog():
     time.sleep(30 if IS_FROZEN else 12)
     while True:
         time.sleep(2)
-        if time.time()-_last_ping>8: os._exit(0)
+        if time.time()-_last_ping>30: os._exit(0)  # threaded 환경에서 여유 확보
 threading.Thread(target=_watchdog,daemon=True).start()
 
 
@@ -983,7 +1163,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.94</title>
+<title>easydsd v0.96</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -1141,6 +1321,14 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
 .mbtns button{padding:8px 18px;border:none;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer}
 .mc{background:#e8eef4;color:#4a6078}.mc:hover{background:#d0dce8}
 .mx{background:#c0392b;color:white}.mx:hover{background:#e74c3c}
+.chk.orange{background:#fff3e0;border:1px solid #ffb74d}
+.chk.orange input{accent-color:#e65100}.chk.orange label{color:#bf360c}
+.period-row{display:none;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px;padding:8px 11px;background:#fff3e0;border-radius:7px;font-size:11px;color:#bf360c}
+.pi{width:58px;padding:4px 6px;border:1px solid #ffb74d;border-radius:5px;font-size:12px;text-align:center;background:#fff8f0;outline:none}
+.pi:focus{border-color:#e65100}
+.period-sep{color:#999;font-size:11px}
+.chk.navy{background:#e8eef4;border:1px solid #90adc4}
+.chk.navy input{accent-color:#1F4E79}.chk.navy label{color:#1F4E79}
 </style>
 </head>
 <body>
@@ -1148,10 +1336,10 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.94</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.96</p>
     </div>
     <div class="hd-right">
-      <div class="hd-badge">v0.9</div>
+      <div class="hd-badge">v0.96</div>
       <button class="kill-btn" onclick="showKill()">&#x23FC; 종료</button>
     </div>
   </div>
@@ -1214,13 +1402,35 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
           <div class="fb" id="fb1"></div>
           <div class="chk teal">
             <input type="checkbox" id="chkRoll">
-            <label for="chkRoll">&#128260; 작년 당기 실적을 올해 전기 칸으로 자동 이월하기 (Rollover)</label>
-            <span class="chk-note">(FIN 시트 무조건 + 주석 AI 판별 · 당기 칸에 000 채움)</span>
+            <label for="chkRoll">&#128260; 롤오버 (작년 당기&#8594;올해 전기 이월, 당기 칸 000 채움)</label>
+          </div>
+          <div class="chk orange">
+            <input type="checkbox" id="chkPeriod" onchange="document.getElementById('periodRow').style.display=this.checked?'flex':'none'">
+            <label for="chkPeriod">&#128197; 기수/연도 자동 변경 (헤더 텍스트 일괄 치환)</label>
+          </div>
+          <div class="period-row" id="periodRow">
+            <label>당기</label>
+            <input class="pi" id="curPeriod" type="number" min="1" max="999" placeholder="40">
+            <span class="period-sep">기</span>
+            <input class="pi" id="curYear" type="number" min="2000" max="2099" placeholder="2026">
+            <span class="period-sep">년</span>
+            <input class="pi" id="startM" type="number" min="1" max="12" placeholder="1">
+            <span class="period-sep">월</span>
+            <input class="pi" id="startD" type="number" min="1" max="31" placeholder="1">
+            <span class="period-sep">일&#126;</span>
+            <input class="pi" id="endM" type="number" min="1" max="12" placeholder="12">
+            <span class="period-sep">월</span>
+            <input class="pi" id="endD" type="number" min="1" max="31" placeholder="31">
+            <span class="period-sep">일</span>
+            <span style="color:#999;font-size:10px">(전기 자동계산)</span>
           </div>
           <div class="chk purple">
+            <input type="checkbox" id="chkNote">
+            <label for="chkNote">&#128218; 주석 번호별 자동 분류 (API없이 기계파싱 / API있으면 Gemini 정밀분류)</label>
+          </div>
+          <div class="chk navy">
             <input type="checkbox" id="chkAI">
-            <label for="chkAI">&#129302; AI를 이용해 재무제표 및 주석 스마트 분류하기</label>
-            <span class="chk-note">(Gemini API Key 필요)</span>
+            <label for="chkAI">&#129302; AI 스마트 분류 (주석 Gemini 활용 &#xB7; API Key &#xD544;&#xC694;)</label>
           </div>
         </div>
       </div>
@@ -1264,6 +1474,10 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
           <input type="file" id="f4" accept=".xlsx" style="display:none" onchange="sf('f4','fb4','dz4')">
           <div class="fb" id="fb4"></div>
         </div>
+      </div>
+      <div class="chk navy" style="margin-bottom:6px">
+        <input type="checkbox" id="chkNoteMap">
+        <label for="chkNoteMap">&#128279; 주석 번호 매핑 검증 (본문 참조번호 vs 실제 주석 시트 대조, API있으면 AI 2차확인)</label>
       </div>
       <button class="btn b-ai" id="btn3" onclick="run3()" disabled>&#129302; AI 교차 검증 실행하기</button>
       <div class="pw" id="pw3"><div class="pb"><div class="pf pf-ai" id="pf3"></div></div><div class="pt" id="pt3">분석 중...</div></div>
@@ -1414,7 +1628,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       <div class="dev-pro">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>Easydsd 0.94v</h2>
+          <h2>Easydsd 0.96v</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + 전기금액 검증 + DSD 비교</div>
           <div class="dev-bg">
             <span class="badge bg0">v0.9</span>
@@ -1426,7 +1640,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.94v</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.96v</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -1500,19 +1714,43 @@ async function run1(){
   document.getElementById('btn1').disabled=true;
   var useAI=document.getElementById('chkAI').checked;
   var doRoll=document.getElementById('chkRoll').checked;
+  var doNote=document.getElementById('chkNote').checked;
+  var doPeriod=document.getElementById('chkPeriod').checked;
   var key=getKey();
-  if(useAI&&!key){ser(1,'AI \\ubd84\\ub958\\ub97c \\uc0ac\\uc6a9\\ud558\\ub824\\uba74 Gemini API Key\\ub97c \\uc785\\ub825\\ud574\\uc8fc\\uc138\\uc694.');document.getElementById('btn1').disabled=false;return;}
-  sp(1,useAI?S1A[0]:S1[0],useAI);var iv=anim(1,useAI?S1A:S1,useAI);
+  if(useAI&&!key){ser(1,'AI \ubd84\ub958\ub97c \uc0ac\uc6a9\ud558\ub824\uba74 Gemini API Key\ub97c \uc785\ub825\ud574\uc8fc\uc138\uc694.');document.getElementById('btn1').disabled=false;return;}
+  if(doPeriod){
+    var cp=parseInt(document.getElementById('curPeriod').value||'0');
+    var cy=parseInt(document.getElementById('curYear').value||'0');
+    if(!cp||!cy){ser(1,'\uae30\uc218\uc640 \uc5f0\ub3c4\ub97c \uc785\ub825\ud574\uc8fc\uc138\uc694.');document.getElementById('btn1').disabled=false;return;}
+  }
+  var isAny=useAI||doNote||doPeriod;
+  sp(1,isAny?S1A[0]:S1[0],isAny);var iv=anim(1,isAny?S1A:S1,isAny);
   try{
-    var fd=new FormData();fd.append('dsd',F.f1);fd.append('ai_classify',useAI?'1':'0');fd.append('rollover',doRoll?'1':'0');fd.append('api_key',key);fd.append('model',getModel());
+    var fd=new FormData();
+    fd.append('dsd',F.f1);
+    fd.append('ai_classify',useAI?'1':'0');
+    fd.append('rollover',doRoll?'1':'0');
+    fd.append('note_classify',doNote?'1':'0');
+    fd.append('period_change',doPeriod?'1':'0');
+    if(doPeriod){
+      fd.append('cur_period',document.getElementById('curPeriod').value);
+      fd.append('cur_year',document.getElementById('curYear').value);
+      fd.append('start_m',document.getElementById('startM').value||'1');
+      fd.append('start_d',document.getElementById('startD').value||'1');
+      fd.append('end_m',document.getElementById('endM').value||'12');
+      fd.append('end_d',document.getElementById('endD').value||'31');
+    }
+    fd.append('api_key',key);fd.append('model',getModel());
     var r=await fetch('/api/dsd2excel',{method:'POST',body:fd});clearInterval(iv);ep(1);
-    if(!r.ok){var e=await r.json();throw new Error(e.error||'\\ubcc0\\ud658 \\uc2e4\\ud328');}
+    if(!r.ok){var e=await r.json();throw new Error(e.error||'\ubcc0\ud658 \uc2e4\ud328');}
     var blob=await r.blob();var info=JSON.parse(r.headers.get('X-Info')||'{}');
-    var fname=F.f1.name.replace(/\\.dsd$/i,'')+'.xlsx';
-    var sub='\\uc2dc\\ud2b8 '+info.sheets+'\\uac1c \\xb7 \\uc218\\uc815\\uac00\\ub2a5 \\uc140 '+info.cells+'\\uac1c \\xb7 \\uc7ac\\ubb344\\ud45c '+info.fin+'\\uac1c';
-    if(doRoll)sub+=' \\xb7 \\uD83D\\uDD04\\ub864\\ub85c\\ubc84 \\uc801\\uc6a9';
-    if(useAI)sub+=' \\xb7 \\uD83E\\uDD16AI\\ubd84\\ub958 \\uc801\\uc6a9';
-    sok(1,'\\ubcc0\\ud658 \\uc644\\ub8cc! Excel \\ud30c\\uc77c\\uc744 \\ub2e4\\uc6b4\\ub85c\\ub4dc\\ud558\\uc138\\uc694',sub,blob,fname);
+    var fname=F.f1.name.replace(/[.]dsd$/i,'')+'.xlsx';
+    var sub='\uc2dc\ud2b8 '+info.sheets+'\uac1c \xb7 \uc218\uc815\uac00\ub2a5 \uc140 '+info.cells+'\uac1c \xb7 \uc7ac\ubb34\ud45c '+info.fin+'\uac1c';
+    if(doRoll)sub+=' \xb7 \uD83D\uDD04\ub864\ub85c\ubc84';
+    if(doNote)sub+=' \xb7 \uD83D\uDCDA\uc8fc\uc11d\ubd84\ub958';
+    if(doPeriod)sub+=' \xb7 \uD83D\uDCC5\uae30\uc218\ubcc0\uacbd';
+    if(useAI)sub+=' \xb7 \uD83E\uDD16AI\ubd84\ub958';
+    sok(1,'\ubcc0\ud658 \uc644\ub8cc! Excel \ud30c\uc77c\uc744 \ub2e4\uc6b4\ub85c\ub4dc\ud558\uc138\uc694',sub,blob,fname);
   }catch(e){clearInterval(iv);ep(1);ser(1,e.message);}
   document.getElementById('btn1').disabled=false;
 }
@@ -1536,7 +1774,9 @@ async function run3(){
   document.getElementById('btn3').disabled=true;
   sp(3,S3[0],true);var iv=anim(3,S3,true);
   try{
+    var doNoteMap=document.getElementById('chkNoteMap').checked;
     var fd=new FormData();fd.append('xlsx',F.f4);fd.append('api_key',key);fd.append('model',getModel());
+    fd.append('check_note_map',doNoteMap?'1':'0');
     var r=await fetch('/api/verify_excel',{method:'POST',body:fd});clearInterval(iv);ep(3);
     if(!r.ok){var e=await r.json();throw new Error(e.error||'\\uac80\\uc99d \\uc2e4\\ud328');}
     var blob=await r.blob();var info=JSON.parse(r.headers.get('X-Info')||'{}');
@@ -1613,23 +1853,42 @@ def api_shutdown():
 @app.route('/api/dsd2excel', methods=['POST'])
 def api_dsd2excel():
     try:
-        dsd_bytes   = request.files['dsd'].read()
-        ai_classify = request.form.get('ai_classify','0')=='1'
-        do_rollover = request.form.get('rollover','0')=='1'
-        api_key     = request.form.get('api_key','').strip()
-        model_name  = request.form.get('model','gemini-3-flash-preview').strip()
-        ai_mapping  = {}
+        dsd_bytes        = request.files['dsd'].read()
+        ai_classify      = request.form.get('ai_classify','0')=='1'
+        do_rollover      = request.form.get('rollover','0')=='1'
+        do_note_classify = request.form.get('note_classify','0')=='1'
+        do_period_change = request.form.get('period_change','0')=='1'
+        api_key          = request.form.get('api_key','').strip()
+        model_name       = request.form.get('model','gemini-3-flash-preview').strip()
+        period_params=None
+        if do_period_change:
+            try:
+                period_params={
+                    'cur_period':int(request.form.get('cur_period','1')),
+                    'cur_year':  int(request.form.get('cur_year','2026')),
+                    'start_m':   int(request.form.get('start_m','1')),
+                    'start_d':   int(request.form.get('start_d','1')),
+                    'end_m':     int(request.form.get('end_m','12')),
+                    'end_d':     int(request.form.get('end_d','31')),
+                }
+            except ValueError:
+                return jsonify(error='기수/연도 입력값을 확인해주세요.'),400
+        ai_mapping={}
         if ai_classify:
             if not api_key:
-                return jsonify(error='AI 분류를 사용하려면 Gemini API Key를 입력해주세요.'), 400
+                return jsonify(error='AI 분류를 사용하려면 Gemini API Key를 입력해주세요.'),400
             xml_raw=zipfile.ZipFile(io.BytesIO(dsd_bytes)).read('contents.xml').decode('utf-8',errors='replace')
             _,tables=parse_xml(xml_raw)
-            ai_mapping=gemini_classify_tables(api_key,tables,model_name)
-        r_key=api_key if do_rollover else ''
+            if not do_note_classify:
+                ai_mapping=gemini_classify_tables(api_key,tables,model_name)
+        r_key=api_key if (do_rollover or do_note_classify) else ''
         xlsx=dsd_to_excel_bytes(dsd_bytes,ai_mapping or None,
                                 do_rollover=do_rollover,
                                 rollover_api_key=r_key,
-                                rollover_model=model_name)
+                                rollover_model=model_name,
+                                do_note_classify=do_note_classify,
+                                do_period_change=do_period_change,
+                                period_params=period_params)
         wb=openpyxl.load_workbook(io.BytesIO(xlsx),data_only=True)
         cells=sum(1 for ws in wb.worksheets for row in ws.iter_rows()
                   for cell in row if cell.fill and cell.fill.fill_type=='solid'
@@ -1678,12 +1937,15 @@ def api_verify_excel():
         xlsx_bytes=request.files['xlsx'].read()
         api_key=request.form.get('api_key','').strip()
         model_name=request.form.get('model','gemini-3-flash-preview').strip()
+        check_note_map=request.form.get('check_note_map','0')=='1'
         py_result=python_verify(xlsx_bytes)
         fin_data,note_data=extract_fin_and_notes(xlsx_bytes)
         if not fin_data:
             return jsonify(error='재무제표 시트(🏦💹📈💰)를 찾을 수 없습니다.'),400
+        note_map_result=py_result.get('note_map') if check_note_map else None
         if api_key:
-            verify_result=gemini_verify_enhanced(api_key,fin_data,note_data,py_result,model_name)
+            verify_result=gemini_verify_enhanced(api_key,fin_data,note_data,py_result,model_name,
+                                                  note_map_result=note_map_result)
         else:
             lines=([f'[오류] {e}' for e in py_result.get('errors',[])]
                    +[f'[경고] {w}' for w in py_result.get('warnings',[])]
@@ -1696,7 +1958,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)
         ws_v.sheet_view.showGridLines=False
-        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.94)')
+        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.96)')
         tc.fill=PatternFill('solid',fgColor='4A148C'); tc.font=Font(color='FFFFFF',bold=True,size=12)
         tc.alignment=Alignment(horizontal='left',vertical='center')
         ws_v.merge_cells('A1:F1'); ws_v.row_dimensions[1].height=28
@@ -1722,7 +1984,8 @@ def api_verify_excel():
                        as_attachment=True,download_name='verified.xlsx')
         resp.headers['X-Info']=json.dumps(
             {'fin_sheets':len(fin_data),'note_sheets':len(note_data),
-             'preview':preview,'py_result':py_result})
+             'preview':preview,'py_result':py_result,
+             'note_map':py_result.get('note_map',{})})
         return resp
     except Exception as e:
         return jsonify(error=str(e)),500
@@ -1858,9 +2121,9 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*54)
-    print('  easydsd v0.94 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.96 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)
     threading.Thread(target=open_browser,daemon=True).start()
-    app.run(host='127.0.0.1',port=PORT,debug=False)
+    app.run(host='127.0.0.1',port=PORT,debug=False,threaded=True)

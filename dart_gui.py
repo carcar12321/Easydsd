@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.06 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.08 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -322,7 +322,7 @@ def _rollover_sheet(ws, fill_000=True):
         c_cell.value = "000" if fill_000 else None
 
 
-def apply_rollover_smart(wb, api_key='', model_name='gemini-3.1-pro-latest'):
+def apply_rollover_smart(wb, api_key='', model_name='gemini-3.1-pro-preview'):
     """
     버그픽스 v0.01:
     - AI 판별 완전 제거
@@ -384,7 +384,7 @@ def classify_notes_machine(tables):
     return result
 
 
-def classify_notes_ai(api_key,tables,anchors,model_name='gemini-3.1-pro-latest'):
+def classify_notes_ai(api_key,tables,anchors,model_name='gemini-3.1-pro-preview'):
     """{table_idx: note_num} — 앵커 힌트+Gemini 추론"""
     if not api_key or not anchors: return {}
     try:
@@ -692,7 +692,7 @@ def python_verify(xlsx_bytes:bytes)->dict:
 
 
 # ── Gemini: AI 시트명 분류 ────────────────────────────────────────────────────
-def gemini_classify_tables(api_key,tables,model_name='gemini-3.1-pro-latest'):
+def gemini_classify_tables(api_key,tables,model_name='gemini-3.1-pro-preview'):
     if not api_key: return {}
     try:
         genai.configure(api_key=api_key)
@@ -718,7 +718,7 @@ def gemini_classify_tables(api_key,tables,model_name='gemini-3.1-pro-latest'):
 
 
 # ── Gemini: 강화 AI 교차 검증 ─────────────────────────────────────────────────
-def gemini_verify_enhanced(api_key,fin_data,note_data,py_result,model_name='gemini-3.1-pro-latest',note_map_result=None):
+def gemini_verify_enhanced(api_key,fin_data,note_data,py_result,model_name='gemini-3.1-pro-preview',note_map_result=None):
     if not api_key: return 'Gemini API Key가 없습니다.'
     try:
         genai.configure(api_key=api_key)
@@ -850,7 +850,7 @@ def parse_dsd_periods(dsd_bytes):
                 results.append((fin_label, acct, cur, pri))
     return results
 
-def validate_prior_period(prev_dsd,curr_dsd,api_key,model_name='gemini-3.1-pro-latest'):
+def validate_prior_period(prev_dsd,curr_dsd,api_key,model_name='gemini-3.1-pro-preview'):
     """
     전기금액 검증:
     prev_dsd의 당기 == curr_dsd의 전기 여야 함
@@ -940,7 +940,7 @@ def parse_dsd_tables(dsd_bytes):
     return {'tables':tables,'exts':exts}
 
 
-def compare_dsd_bytes(dsd_a,dsd_b,api_key,model_name='gemini-3.1-pro-latest'):
+def compare_dsd_bytes(dsd_a,dsd_b,api_key,model_name='gemini-3.1-pro-preview'):
     data_a=parse_dsd_tables(dsd_a); data_b=parse_dsd_tables(dsd_b)
     ext_diffs=[]
     for k in set(list(data_a['exts'].keys())+list(data_b['exts'].keys())):
@@ -1040,7 +1040,7 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     # 사용안내 (요약수치 시트 없음)
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.06)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.08)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -1367,7 +1367,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.06</title>
+<title>easydsd v0.08</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -1542,7 +1542,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.06</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.08</p>
     </div>
     <div class="hd-right">
       <div class="hd-badge">v0.01</div>
@@ -1568,9 +1568,8 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
     <span class="api-st" id="apiStAnt">&#x26AA; 미입력</span>
     <button class="api-clr" onclick="clearKeyAnt()">&#x2715;</button>
     <select id="modelSel" class="api-sel" onchange="saveModel(this.value)">
-      <option value="gemini-3.1-pro-latest">Gemini 3.1 Pro &#x2605; 기본</option>
-      <option value="gemini-3-flash-latest">Gemini 3 Flash</option>
-      <option value="gemini-2.5-pro-latest">Gemini 2.5 Pro</option>
+      <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro &#x2605; 기본</option>
+      <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
       <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
       <option value="claude-opus-4-6">Claude Opus 4.6</option>
     </select>
@@ -1848,7 +1847,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       <div class="dev-pro">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>easydsd v0.06</h2>
+          <h2>easydsd v0.08</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + 전기금액 검증 + DSD 비교</div>
           <div class="dev-bg">
             <span class="badge bg0">v0.01</span>
@@ -1860,7 +1859,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">easydsd v0.06</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">easydsd v0.08</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -1896,7 +1895,7 @@ function updStAnt(v){var e=document.getElementById('apiStAnt');if(v&&v.length>10
 function getActiveKey(){var m=getModel();return(m.startsWith('claude'))?getKeyAnt():getKey();}
 function updSt(v){var e=document.getElementById('apiSt');if(v&&v.length>10){e.textContent='\\uD83D\\uDFE2 입력됨';e.style.color='#a5d6a7';}else{e.textContent='\\u26AA 미입력';e.style.color='rgba(255,255,255,.6)';}}
 function saveModel(v){localStorage.setItem('easydsd_m',v);}
-function getModel(){return localStorage.getItem('easydsd_m')||'gemini-3.1-pro-latest';}
+function getModel(){return localStorage.getItem('easydsd_m')||'gemini-3.1-pro-preview';}
 function loadModel(){var m=getModel();var s=document.getElementById('modelSel');if(s)s.value=m;}
 loadKey();loadModel();
 var _ka=localStorage.getItem('easydsd_ka')||'';
@@ -2165,7 +2164,7 @@ def api_verify_excel():
     try:
         xlsx_bytes=request.files['xlsx'].read()
         api_key=request.form.get('api_key','').strip()
-        model_name=request.form.get('model','gemini-3.1-pro-latest').strip()
+        model_name=request.form.get('model','gemini-3.1-pro-preview').strip()
         check_note_map=request.form.get('check_note_map','0')=='1'
         py_result=python_verify(xlsx_bytes)
         fin_data,note_data=extract_fin_and_notes(xlsx_bytes)
@@ -2187,7 +2186,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)
         ws_v.sheet_view.showGridLines=False
-        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.06)')
+        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.08)')
         tc.fill=PatternFill('solid',fgColor='4A148C'); tc.font=Font(color='FFFFFF',bold=True,size=12)
         tc.alignment=Alignment(horizontal='left',vertical='center')
         ws_v.merge_cells('A1:F1'); ws_v.row_dimensions[1].height=28
@@ -2324,7 +2323,7 @@ def api_compare_dsd():
     try:
         dsd_a=request.files['dsd_a'].read(); dsd_b=request.files['dsd_b'].read()
         api_key=request.form.get('api_key','').strip()
-        model_name=request.form.get('model','gemini-3.1-pro-latest').strip()
+        model_name=request.form.get('model','gemini-3.1-pro-preview').strip()
         result=compare_dsd_bytes(dsd_a,dsd_b,api_key,model_name)
         da=parse_dsd_tables(dsd_a); db=parse_dsd_tables(dsd_b)
         ext_diffs=sum(1 for k in set(list(da['exts'].keys())+list(db['exts'].keys()))
@@ -2350,7 +2349,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*54)
-    print('  easydsd v0.06 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.08 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)

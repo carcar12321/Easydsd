@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""easydsd v0.96 - DART 감사보고서 변환 도구 + Gemini AI"""
+"""easydsd v0.01 - DART 감사보고서 변환 도구 + Gemini AI"""
 
 import os, re, sys, io, zipfile, threading, webbrowser, socket, time, json
 
@@ -15,7 +15,7 @@ IS_FROZEN = getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS')
 BASE_DIR  = os.path.dirname(sys.executable if IS_FROZEN else os.path.abspath(__file__))
 
 try:
-    from flask import Flask, request, send_file, jsonify, render_template_string
+    from flask import Flask, request, send_file, jsonify, render_template_string, Response
     import openpyxl
     from openpyxl.styles import PatternFill, Font, Alignment
     from openpyxl.utils import get_column_letter
@@ -25,7 +25,7 @@ except ImportError:
         sys.exit(1)
     import subprocess
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'flask', 'openpyxl', '-q'])
-    from flask import Flask, request, send_file, jsonify, render_template_string
+    from flask import Flask, request, send_file, jsonify, render_template_string, Response
     import openpyxl
     from openpyxl.styles import PatternFill, Font, Alignment
     from openpyxl.utils import get_column_letter
@@ -179,10 +179,10 @@ def safe_fmt(v, fmt=',.0f', fallback='없음'):
         return fallback
 
 
-# ── 기능1: 롤오버 v0.92 — 정교한 Column 지정 롤오버 ──────────────────────────
+# ── 기능1: 롤오버 v0.01 — 정교한 Column 지정 롤오버 ──────────────────────────
 def _rollover_sheet(ws, fill_000=True):
     """
-    Column-targeted 롤오버 (v0.92 버그픽스):
+    Column-targeted 롤오버 (v0.01 버그픽스):
 
     [이전 버그]
     - '5,32,33' 같은 주석 참조 번호가 숫자로 오인되어
@@ -272,7 +272,7 @@ def _rollover_sheet(ws, fill_000=True):
 
 def apply_rollover_smart(wb, api_key='', model_name='gemini-3-flash-preview'):
     """
-    버그픽스 v0.91:
+    버그픽스 v0.01:
     - AI 판별 완전 제거
     - 4대 재무제표 본문 시트만 무조건 롤오버
       (시트명에 '재무상태표','손익계산서','자본변동표','현금흐름표' 포함 여부로 판단)
@@ -366,7 +366,9 @@ def group_note_tables(remaining,note_assignment,notes_per_sheet=5):
     note_groups={}; unassigned=[]
     for tbl in remaining:
         n=note_assignment.get(tbl['idx'])
-        if n: note_groups.setdefault(n,[]).append(tbl)
+        # n이 0이거나 None이면 미분류 처리
+        if n and isinstance(n,int) and n>0:
+            note_groups.setdefault(n,[]).append(tbl)
         else: unassigned.append(tbl)
     sorted_notes=sorted(note_groups.keys())
     groups=[]
@@ -401,8 +403,8 @@ def apply_period_change(wb,cur_period,cur_year,start_m,start_d,end_m,end_d):
                 m=re.search(r'제\s*(\d{1,3})\s*\(전\)',v)
                 if m and not old_prev_p: old_prev_p=int(m.group(1))
         if old_cur_p: break
-    if not old_cur_p:  old_cur_p=cur_period-1
-    if not old_prev_p: old_prev_p=cur_period-2
+    if not old_cur_p or old_cur_p<=0:  old_cur_p=cur_period-1
+    if not old_prev_p or old_prev_p<=0: old_prev_p=cur_period-2
 
     # 기존 연도 탐지
     year_in_hdr=[]
@@ -875,7 +877,7 @@ def extract_fin_and_notes(xlsx_bytes):
     wb=openpyxl.load_workbook(io.BytesIO(xlsx_bytes),data_only=True)
     fin_data={}; note_data={}
     for sname in wb.sheetnames:
-        if sname in ('📋사용안내','_원본XML'): continue
+        if sname in ('📋사용안내','_원본XML','📊요약수치','🤖AI검증결과'): continue
         ws=wb[sname]
         rows_data=[]
         for row in ws.iter_rows(max_row=200,values_only=True):
@@ -901,7 +903,7 @@ def dsd_to_excel_bytes(dsd_bytes,ai_mapping=None,do_rollover=False,
     # 사용안내 (요약수치 시트 없음)
     ws0=wb.active; ws0.title='📋사용안내'; ws0.sheet_view.showGridLines=False
     guide=[
-        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.96)',True,C['white'],C['navy'],13),
+        ('DART 감사보고서 DSD - Excel 변환 도구 (easydsd v0.01)',True,C['white'],C['navy'],13),
         ('',False,'','',8),
         ('【 작업 순서 】',True,C['navy'],C['lblue'],11),
         ('  1. 노란색 셀을 당해년도 숫자/텍스트로 수정하세요',False,'000000',C['white'],10),
@@ -1163,7 +1165,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>easydsd v0.96</title>
+<title>easydsd v0.01</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh}
@@ -1336,10 +1338,10 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
   <div class="hd-top">
     <div>
       <h1>&#128202; DART 감사보고서 변환 도구</h1>
-      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.96</p>
+      <p>DSD &harr; Excel &nbsp;&#xB7;&nbsp; AI 검증 &nbsp;&#xB7;&nbsp; 전기금액 검증 &nbsp;&#xB7;&nbsp; 롤오버 &nbsp;&#xB7;&nbsp; easydsd v0.01</p>
     </div>
     <div class="hd-right">
-      <div class="hd-badge">v0.96</div>
+      <div class="hd-badge">v0.01</div>
       <button class="kill-btn" onclick="showKill()">&#x23FC; 종료</button>
     </div>
   </div>
@@ -1628,10 +1630,10 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       <div class="dev-pro">
         <div class="dev-av">&#127970;</div>
         <div class="dev-info">
-          <h2>Easydsd 0.96v</h2>
+          <h2>easydsd v0.01</h2>
           <div class="dev-sub">DART 감사보고서 DSD 변환 + AI 검증 + 전기금액 검증 + DSD 비교</div>
           <div class="dev-bg">
-            <span class="badge bg0">v0.9</span>
+            <span class="badge bg0">v0.01</span>
             <span class="badge bgg">&#129302; AI-Powered</span>
             <span class="badge bgt">Python+Flask</span>
             <span class="badge bga">Gemini 3 Flash</span>
@@ -1640,7 +1642,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
       </div>
       <div class="ig">
         <div class="ib"><div class="lbl">개발자</div><div class="val"><a href="mailto:eeffco11@naver.com">eeffco11@naver.com</a></div></div>
-        <div class="ib"><div class="lbl">버전</div><div class="val">Easydsd 0.96v</div></div>
+        <div class="ib"><div class="lbl">버전</div><div class="val">easydsd v0.01</div></div>
         <div class="ib"><div class="lbl">지원 파일</div><div class="val">.dsd / .xlsx</div></div>
         <div class="ib"><div class="lbl">AI 엔진</div><div class="val">Gemini 3 Flash</div></div>
       </div>
@@ -1651,7 +1653,7 @@ body{font-family:'Malgun Gothic',sans-serif;background:#f0f4f8;color:#1a1a2e;min
         </div>
       </div>
       <div class="fs">
-        <h3>&#10024; v0.9 주요 기능</h3>
+        <h3>&#10024; v0.01 주요 기능</h3>
         <div class="fi"><div class="fic">&#128260;</div><div><b>스마트 롤오버</b> - FIN 시트 무조건 + 주석 AI 판별, 당기 칸 000 자동 채움</div></div>
         <div class="fi"><div class="fic">&#8721;</div><div><b>SUM 수식 자동화</b> - 합계/총계 행을 =SUM() 수식으로 자동 교체 + 하늘색 강조</div></div>
         <div class="fi"><div class="fic">&#128270;</div><div><b>전기금액 검증</b> - 수정전 당기 == 수정후 전기 일치 여부 항목별 자동 검사</div></div>
@@ -1746,10 +1748,10 @@ async function run1(){
     var blob=await r.blob();var info=JSON.parse(r.headers.get('X-Info')||'{}');
     var fname=F.f1.name.replace(/[.]dsd$/i,'')+'.xlsx';
     var sub='\uc2dc\ud2b8 '+info.sheets+'\uac1c \xb7 \uc218\uc815\uac00\ub2a5 \uc140 '+info.cells+'\uac1c \xb7 \uc7ac\ubb34\ud45c '+info.fin+'\uac1c';
-    if(doRoll)sub+=' \xb7 \uD83D\uDD04\ub864\ub85c\ubc84';
-    if(doNote)sub+=' \xb7 \uD83D\uDCDA\uc8fc\uc11d\ubd84\ub958';
-    if(doPeriod)sub+=' \xb7 \uD83D\uDCC5\uae30\uc218\ubcc0\uacbd';
-    if(useAI)sub+=' \xb7 \uD83E\uDD16AI\ubd84\ub958';
+    if(doRoll)sub+=' \xb7 &#x1F504;\ub864\ub85c\ubc84';
+    if(doNote)sub+=' \xb7 &#x1F4DA;\uc8fc\uc11d\ubd84\ub958';
+    if(doPeriod)sub+=' \xb7 &#x1F4C5;\uae30\uc218\ubcc0\uacbd';
+    if(useAI)sub+=' \xb7 &#x1F916;AI\ubd84\ub958';
     sok(1,'\ubcc0\ud658 \uc644\ub8cc! Excel \ud30c\uc77c\uc744 \ub2e4\uc6b4\ub85c\ub4dc\ud558\uc138\uc694',sub,blob,fname);
   }catch(e){clearInterval(iv);ep(1);ser(1,e.message);}
   document.getElementById('btn1').disabled=false;
@@ -1839,7 +1841,7 @@ async function doKill(){
 
 # ── Flask 라우트 ──────────────────────────────────────────────────────────────
 @app.route('/')
-def index(): return render_template_string(HTML)
+def index(): return Response(HTML, mimetype='text/html; charset=utf-8')
 
 @app.route('/api/heartbeat', methods=['POST'])
 def api_heartbeat():
@@ -1902,6 +1904,8 @@ def api_dsd2excel():
             {'sheets':len(wb.sheetnames),'cells':cells,'fin':len(fin),'ai':bool(ai_mapping),'rollover':do_rollover})
         return resp
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify(error=str(e)),500
 
 @app.route('/api/excel2dsd', methods=['POST'])
@@ -1958,7 +1962,7 @@ def api_verify_excel():
         if '🤖AI검증결과' in wb.sheetnames: del wb['🤖AI검증결과']
         ws_v=wb.create_sheet('🤖AI검증결과',0)
         ws_v.sheet_view.showGridLines=False
-        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.96)')
+        tc=ws_v.cell(1,1,'🤖 Gemini AI + Python 재무제표 검증 결과 (easydsd v0.01)')
         tc.fill=PatternFill('solid',fgColor='4A148C'); tc.font=Font(color='FFFFFF',bold=True,size=12)
         tc.alignment=Alignment(horizontal='left',vertical='center')
         ws_v.merge_cells('A1:F1'); ws_v.row_dimensions[1].height=28
@@ -2121,7 +2125,7 @@ def open_browser():
 
 if __name__=='__main__':
     print('='*54)
-    print('  easydsd v0.96 - DART 감사보고서 변환 + AI')
+    print('  easydsd v0.01 - DART 감사보고서 변환 + AI')
     print(f'  http://127.0.0.1:{PORT}')
     print('  종료: 브라우저 종료 버튼 or Ctrl+C')
     print('='*54)
